@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Wiret</string>
+    <key>CFBundleDisplayName</key>
+    <string>Wiret</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.hanoseok.wiret</string>
+    <key>CFBundleExecutable</key>
+    <string>Wiret</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Wiret는 메뉴바에서 음성을 녹음하기 위해 마이크 접근이 필요합니다.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Wiret는 Google 캘린더 회의 시간에 맞춰 자동으로 녹음하기 위해 캘린더 접근이 필요합니다.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Wiret는 Google 캘린더 회의 시간에 맞춰 자동으로 녹음하기 위해 캘린더 접근이 필요합니다.</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+</dict>
+</plist>
