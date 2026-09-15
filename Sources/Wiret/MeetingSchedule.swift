@@ -8,16 +8,20 @@ struct Meeting: Equatable {
 }
 
 enum MeetingSchedule {
+    /// Every meeting in progress at `now` (start <= now < end), latest start first; tie -> earliest end.
+    static func currentAll(in meetings: [Meeting], at now: Date) -> [Meeting] {
+        meetings
+            .filter { $0.start <= now && now < $0.end }
+            .sorted { lhs, rhs in
+                if lhs.start != rhs.start { return lhs.start > rhs.start }
+                return lhs.end < rhs.end
+            }
+    }
+
     /// Meeting currently in progress at `now` (start <= now < end). If several overlap, pick the one
     /// that started latest; tie -> earliest end.
     static func current(in meetings: [Meeting], at now: Date) -> Meeting? {
-        let inProgress = meetings.filter { $0.start <= now && now < $0.end }
-        return inProgress.reduce(nil) { (best: Meeting?, candidate: Meeting) -> Meeting? in
-            guard let best else { return candidate }
-            if candidate.start > best.start { return candidate }
-            if candidate.start == best.start && candidate.end < best.end { return candidate }
-            return best
-        }
+        currentAll(in: meetings, at: now).first
     }
 
     /// Next meeting starting after `now` (earliest start).
@@ -34,6 +38,7 @@ enum AutoRecordAction: Equatable {
     case none
     case start(Meeting)
     case stop
+    case choose([Meeting])
 }
 
 struct AutoRecordState: Equatable {
@@ -43,13 +48,18 @@ struct AutoRecordState: Equatable {
 }
 
 enum AutoRecordPolicy {
-    /// Decide what to do at `now`.
+    /// Decide what to do given every meeting in progress right now.
     /// - auto disabled: if autoMeetingId != nil && isRecording -> .stop (turning auto off ends an auto recording), else .none
-    /// - not recording: if current meeting exists -> .start(meeting) unless that meeting id equals `lastFinishedAutoMeetingId`
-    ///   (don't restart a meeting we already auto-stopped, e.g. user manually stopped early) -> .none
     /// - recording manually (autoMeetingId == nil): .none (never interfere with manual recordings)
-    /// - recording auto (autoMeetingId != nil): if current meeting?.id != autoMeetingId -> .stop (next tick will start the new one)
-    static func decide(state: AutoRecordState, current: Meeting?, lastFinishedAutoMeetingId: String?) -> AutoRecordAction {
+    /// - recording auto (autoMeetingId != nil): .none while that meeting is still in progress, else .stop.
+    ///   An overlapping meeting starting does not interrupt the running one.
+    /// - idle: meetings already handled (`finishedMeetingIds`) are skipped; one candidate -> .start,
+    ///   several -> .choose (ask the user which one to record).
+    static func decide(
+        state: AutoRecordState,
+        current: [Meeting],
+        finishedMeetingIds: Set<String>
+    ) -> AutoRecordAction {
         if !state.autoEnabled {
             if state.autoMeetingId != nil && state.isRecording {
                 return .stop
@@ -57,20 +67,21 @@ enum AutoRecordPolicy {
             return .none
         }
 
-        if !state.isRecording {
-            if let current, current.id != lastFinishedAutoMeetingId {
-                return .start(current)
-            }
+        if state.isRecording && state.autoMeetingId == nil {
             return .none
         }
 
-        guard let autoMeetingId = state.autoMeetingId else {
-            return .none
+        if let autoMeetingId = state.autoMeetingId {
+            return current.contains { $0.id == autoMeetingId } ? .none : .stop
         }
 
-        if current?.id != autoMeetingId {
-            return .stop
+        let candidates = current.filter { !finishedMeetingIds.contains($0.id) }
+        if candidates.isEmpty {
+            return .none
         }
-        return .none
+        if candidates.count == 1 {
+            return .start(candidates[0])
+        }
+        return .choose(candidates)
     }
 }

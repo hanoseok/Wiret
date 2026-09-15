@@ -16,12 +16,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var autoItem: NSMenuItem!
     private(set) var autoStatusItem: NSMenuItem!
 
-    private var isStarting = false
+    /// A start request that never completes (a permission prompt left open, say) must not block auto
+    /// recording forever.
+    private static let startInFlightTimeout: TimeInterval = 120
+
+    private var isStarting = false {
+        didSet {
+            if isStarting { startRequestedAt = Date() }
+        }
+    }
+    private var startRequestedAt = Date.distantPast
+    private var choiceWindow: MeetingChoiceWindowController?
+    private var wakeObserver: NSObjectProtocol?
     var suppressAlertsForTesting = false
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         super.init()
+    }
+
+    deinit {
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -61,7 +78,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         coordinator.isRecordingProvider = { [weak self] in self?.state == .recording }
-        coordinator.isStartInFlightProvider = { [weak self] in self?.isStarting ?? false }
+        coordinator.isStartInFlightProvider = { [weak self] in
+            guard let self, self.isStarting else { return false }
+            return Date().timeIntervalSince(self.startRequestedAt) < Self.startInFlightTimeout
+        }
         coordinator.onStart = { [weak self] meeting in self?.startAutoRecording(for: meeting) }
         coordinator.onStop = { [weak self] in self?.endRecording() }
         coordinator.onStatusText = { [weak self] text in self?.autoStatusItem.title = text }
@@ -69,8 +89,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.showCalendarDeniedAlert()
             self?.autoItem.state = .off
         }
+        coordinator.onChoose = { [weak self] meetings in self?.presentMeetingChoice(meetings) }
+        coordinator.onChoiceObsolete = { [weak self] in self?.dismissMeetingChoice() }
         autoItem.state = coordinator.isEnabled ? .on : .off
         coordinator.start()
+
+        // Waking from sleep: re-check immediately so a meeting that ended while asleep stops right
+        // away and a meeting that is now in progress starts.
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.coordinator.tick()
+        }
 
         updateMenu()
 
@@ -80,6 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        coordinator.releaseForTermination()
         _ = recorder.stop()
     }
 
@@ -135,16 +168,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func startRecording() {
-        beginRecording(title: nil)
+        _ = beginRecording(title: nil)
     }
 
     private func startAutoRecording(for meeting: Meeting) {
-        beginRecording(title: meeting.title)
+        if !beginRecording(title: meeting.title) {
+            // Busy or already recording: don't leave the coordinator waiting on a recording that never began.
+            coordinator.noteAutoStartFailed()
+        }
     }
 
-    private func beginRecording(title: String?) {
+    /// - Returns: whether the start request was accepted (a permission or recorder failure is reported
+    ///   asynchronously through `coordinator.noteAutoStartFailed()`).
+    @discardableResult
+    private func beginRecording(title: String?) -> Bool {
         guard state == .idle, !isStarting else {
-            return
+            return false
         }
         isStarting = true
         startItem.isEnabled = false
@@ -171,6 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.showPermissionDeniedAlert()
             }
         }
+        return true
     }
 
     @objc private func stopRecording() {
@@ -201,6 +241,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let error {
             showErrorAlert(error)
         }
+    }
+
+    private func presentMeetingChoice(_ meetings: [Meeting]) {
+        if suppressAlertsForTesting { return }
+        dismissMeetingChoice()
+
+        let controller = MeetingChoiceWindowController(
+            meetings: meetings,
+            onChoose: { [weak self] meeting in
+                self?.choiceWindow = nil
+                self?.coordinator.choose(meeting)
+            },
+            onSkip: { [weak self] in
+                self?.choiceWindow = nil
+                self?.coordinator.skipChoice()
+            }
+        )
+        choiceWindow = controller
+        controller.show()
+    }
+
+    private func dismissMeetingChoice() {
+        choiceWindow?.dismiss()
+        choiceWindow = nil
     }
 
     private func showPermissionDeniedAlert() {

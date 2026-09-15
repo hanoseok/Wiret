@@ -39,6 +39,27 @@ final class MeetingScheduleTests: XCTestCase {
         XCTAssertEqual(MeetingSchedule.current(in: [sameStartLongEnd, sameStartShortEnd], at: now), sameStartShortEnd)
     }
 
+    func testCurrentAllReturnsBothOverlappingMeetingsLatestStartFirst() {
+        let earlier = Meeting(id: "a", title: "A", start: date(9), end: date(11))
+        let later = Meeting(id: "b", title: "B", start: date(10), end: date(11, 30))
+        let now = date(10, 15)
+        XCTAssertEqual(MeetingSchedule.currentAll(in: [earlier, later], at: now), [later, earlier])
+    }
+
+    func testCurrentAllTieBreaksOnEarliestEnd() {
+        let longEnd = Meeting(id: "a", title: "A", start: date(9), end: date(11))
+        let shortEnd = Meeting(id: "b", title: "B", start: date(9), end: date(10))
+        let now = date(9, 30)
+        XCTAssertEqual(MeetingSchedule.currentAll(in: [longEnd, shortEnd], at: now), [shortEnd, longEnd])
+    }
+
+    func testCurrentAllExcludesMeetingsNotInProgress() {
+        let past = Meeting(id: "a", title: "A", start: date(8), end: date(9))
+        let running = Meeting(id: "b", title: "B", start: date(9), end: date(11))
+        let future = Meeting(id: "c", title: "C", start: date(12), end: date(13))
+        XCTAssertEqual(MeetingSchedule.currentAll(in: [past, running, future], at: date(10)), [running])
+    }
+
     func testNextReturnsEarliestFutureMeeting() {
         let far = Meeting(id: "a", title: "A", start: date(14), end: date(15))
         let near = Meeting(id: "b", title: "B", start: date(11), end: date(12))
