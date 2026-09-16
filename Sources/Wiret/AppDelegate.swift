@@ -4,6 +4,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let recorder = AudioRecorder()
     private let calendarSource = EventKitMeetingSource()
     private let defaults: UserDefaults
+    private let voiceMemosImporter: VoiceMemosImporter
     private(set) lazy var coordinator = AutoRecordingCoordinator(source: calendarSource, defaults: defaults)
 
     var state: RecordingState = .idle {
@@ -15,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var stopItem: NSMenuItem!
     private(set) var autoItem: NSMenuItem!
     private(set) var autoStatusItem: NSMenuItem!
+    private(set) var voiceMemosItem: NSMenuItem!
 
     /// A start request that never completes (a permission prompt left open, say) must not block auto
     /// recording forever.
@@ -30,10 +32,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var wakeObserver: NSObjectProtocol?
     var suppressAlertsForTesting = false
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        voiceMemosImporter: VoiceMemosImporter = VoiceMemosImporter()
+    ) {
         self.defaults = defaults
+        self.voiceMemosImporter = voiceMemosImporter
         super.init()
     }
+
+    private static let voiceMemosImportKey = "voiceMemosImportEnabled"
+
+    /// 음성 메모 가져오기는 사용자가 단축어를 만들어 두어야 동작하므로 기본값은 꺼짐이다.
+    var isVoiceMemosImportEnabled: Bool {
+        get { defaults.bool(forKey: Self.voiceMemosImportKey) }
+        set { defaults.set(newValue, forKey: Self.voiceMemosImportKey) }
+    }
+
+    /// 녹음이 예기치 않게 끝났을 때도 가져올 파일을 알 수 있도록 현재 녹음 경로를 들고 있는다.
+    private var currentRecordingURL: URL?
 
     deinit {
         if let wakeObserver {
@@ -64,6 +81,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         autoStatusItem = NSMenuItem(title: "자동: 꺼짐", action: nil, keyEquivalent: "")
         autoStatusItem.isEnabled = false
         menu.addItem(autoStatusItem)
+
+        voiceMemosItem = NSMenuItem(
+            title: "음성 메모로 보내기",
+            action: #selector(toggleVoiceMemosImport),
+            keyEquivalent: ""
+        )
+        voiceMemosItem.target = self
+        voiceMemosItem.state = isVoiceMemosImportEnabled ? .on : .off
+        menu.addItem(voiceMemosItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -113,7 +139,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         coordinator.releaseForTermination()
-        _ = recorder.stop()
+        let url = recorder.stop() ?? currentRecordingURL
+        currentRecordingURL = nil
+        if let url {
+            // 프로세스가 곧 사라지므로 백그라운드 큐에 맡기면 가져오기가 중간에 끊긴다.
+            importToVoiceMemos(url, synchronously: true)
+        }
     }
 
     var isStatusItemVisibleInMenuBar: Bool {
@@ -193,7 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.isStarting = false
             if granted {
                 do {
-                    _ = try self.recorder.start(title: title)
+                    self.currentRecordingURL = try self.recorder.start(title: title)
                     self.state = .recording
                 } catch {
                     self.updateMenu()
@@ -219,13 +250,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func endRecording() {
-        _ = recorder.stop()
+        let url = recorder.stop() ?? currentRecordingURL
+        currentRecordingURL = nil
         state = .idle
+        if let url {
+            importToVoiceMemos(url)
+        }
     }
 
     @objc private func toggleAuto() {
         coordinator.setEnabled(!coordinator.isEnabled)
         autoItem.state = coordinator.isEnabled ? .on : .off
+    }
+
+    @objc private func toggleVoiceMemosImport() {
+        if isVoiceMemosImportEnabled {
+            setVoiceMemosImport(enabled: false)
+            return
+        }
+
+        // 단축어가 없으면 녹음이 끝날 때마다 실패하므로, 켜는 시점에 먼저 확인하고 만드는 법을 안내한다.
+        guard voiceMemosImporter.isShortcutInstalled else {
+            setVoiceMemosImport(enabled: false)
+            showShortcutSetupAlert()
+            return
+        }
+        setVoiceMemosImport(enabled: true)
+    }
+
+    private func setVoiceMemosImport(enabled: Bool) {
+        isVoiceMemosImportEnabled = enabled
+        voiceMemosItem?.state = enabled ? .on : .off
+    }
+
+    /// 녹음을 음성 메모로 가져온다. 원본 삭제는 가져오기가 성공했을 때만 일어난다.
+    private func importToVoiceMemos(_ url: URL, synchronously: Bool = false) {
+        guard isVoiceMemosImportEnabled else { return }
+
+        let importer = voiceMemosImporter
+        let work = { [weak self] in
+            let result = importer.importRecording(at: url, deletingOriginal: true)
+            guard case .failure(let error) = result else { return }
+            let report: () -> Void = {
+                guard let self else { return }
+                self.handleVoiceMemosImportFailure(error)
+            }
+            if synchronously {
+                report()
+            } else {
+                DispatchQueue.main.async(execute: report)
+            }
+        }
+
+        if synchronously {
+            work()
+        } else {
+            DispatchQueue.global(qos: .utility).async(execute: work)
+        }
+    }
+
+    func handleVoiceMemosImportFailure(_ error: VoiceMemosImportError) {
+        // 빈 녹음은 애초에 가져올 게 없으므로 조용히 넘어간다.
+        if case .recordingUnavailable = error { return }
+
+        // 단축어가 사라진 상태로 두면 녹음이 끝날 때마다 같은 실패가 반복된다.
+        if case .shortcutMissing = error {
+            setVoiceMemosImport(enabled: false)
+        }
+        showVoiceMemosErrorAlert(error)
     }
 
     @objc private func quit() {
@@ -238,6 +330,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func handleUnexpectedStop(_ error: Error?) {
         coordinator.noteManualStop()
         state = .idle
+        let url = currentRecordingURL
+        currentRecordingURL = nil
+        if let url {
+            importToVoiceMemos(url)
+        }
         if let error {
             showErrorAlert(error)
         }
@@ -299,6 +396,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    private func showShortcutSetupAlert() {
+        if suppressAlertsForTesting { return }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "\"\(VoiceMemosImporter.defaultShortcutName)\" 단축어가 필요합니다"
+        alert.informativeText = """
+        음성 메모 앱은 외부 앱이 파일을 직접 넣을 수 없고, 단축어의 "녹음 가져오기" 동작으로만 추가할 수 있습니다. 단축어 앱에서 한 번만 만들어 주세요.
+
+        1. 단축어 앱을 열고 새 단축어를 만듭니다.
+        2. "입력을 받기"를 켜고 입력 종류를 파일로 둡니다.
+        3. 음성 메모의 "녹음 가져오기" 동작을 추가하고 오디오 파일에 단축어 입력을 연결합니다.
+        4. 단축어 이름을 \(VoiceMemosImporter.defaultShortcutName) 으로 저장합니다.
+        """
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "단축어 앱 열기")
+        alert.addButton(withTitle: "취소")
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn,
+           let url = URL(string: "shortcuts://create-shortcut") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func showVoiceMemosErrorAlert(_ error: VoiceMemosImportError) {
+        if suppressAlertsForTesting { return }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "음성 메모로 가져오지 못했습니다"
+        alert.informativeText = (error.errorDescription ?? "") + "\n\n녹음 파일은 ~/Music/Wiret 에 그대로 남아 있습니다."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "확인")
+        alert.runModal()
     }
 
     private func showErrorAlert(_ error: Error) {
