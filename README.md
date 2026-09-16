@@ -68,6 +68,24 @@ Wiret은 회의 시작 30분 전부터 회의가 끝날 때까지 시스템 유�
 
 잠자기에서 깨어나면 Wiret은 즉시 회의 상태를 다시 확인해, 자는 동안 끝난 회의는 바로 중단하고 그 사이에 시작된 회의는 바로 녹음을 시작합니다.
 
+## 다운로드 (스냅샷 빌드)
+
+`develop` 브랜치에 푸시되면 GitHub Actions가 자동으로 `x.y.z-SNAPSHOT` 버전을 빌드해 릴리스로 올립니다. (`0.0.1-SNAPSHOT`부터 시작하고, 푸시될 때마다 패치 번호가 1씩 올라갑니다.)
+
+- 항상 최신 스냅샷: <https://github.com/hanoseok/Wiret/releases/download/snapshot-latest/Wiret-snapshot.zip>
+- 버전별 스냅샷: <https://github.com/hanoseok/Wiret/releases>
+
+```bash
+curl -L -o Wiret-snapshot.zip \
+  https://github.com/hanoseok/Wiret/releases/download/snapshot-latest/Wiret-snapshot.zip
+unzip Wiret-snapshot.zip
+mv Wiret.app /Applications/
+xattr -dr com.apple.quarantine /Applications/Wiret.app
+open /Applications/Wiret.app
+```
+
+압축을 풀면 바로 실행할 수 있는 `Wiret.app`이 나옵니다. 배포용 개발자 서명이 없는 ad-hoc 서명 앱이라, 내려받은 뒤 첫 실행 전에 위처럼 격리 속성(`com.apple.quarantine`)을 제거해야 합니다. 스냅샷 빌드는 Apple Silicon과 Intel을 모두 지원하는 universal 바이너리입니다.
+
 ## 빌드 방법
 
 ```bash
@@ -75,6 +93,18 @@ Wiret은 회의 시작 30분 전부터 회의가 끝날 때까지 시스템 유�
 ```
 
 `Package.swift` 기준으로 release 빌드를 수행하고, `build/Wiret.app` 번들을 생성한 뒤 ad-hoc 코드사이닝을 적용합니다.
+
+다음 환경 변수로 동작을 바꿀 수 있습니다. (CI 스냅샷 빌드가 사용하는 값입니다.)
+
+| 환경 변수 | 설명 |
+| --- | --- |
+| `UNIVERSAL=1` | arm64 + x86_64 universal 바이너리로 빌드 |
+| `MARKETING_VERSION=x.y.z` | `CFBundleShortVersionString` 덮어쓰기 |
+| `BUILD_NUMBER=n` | `CFBundleVersion` 덮어쓰기 |
+
+```bash
+UNIVERSAL=1 MARKETING_VERSION=0.0.1 BUILD_NUMBER=1 ./build_app.sh
+```
 
 ## 실행
 
@@ -105,3 +135,15 @@ macOS는 메뉴 막대가 가득 차면 새 아이콘을 노치 뒤로 숨깁니
 ```bash
 swift test
 ```
+
+## 스냅샷 릴리스 (CI)
+
+`.github/workflows/snapshot.yml`이 `develop` 브랜치 푸시마다 아래 순서로 동작합니다.
+
+1. 기존 `v*.*.*-SNAPSHOT` 태그 중 가장 높은 버전을 찾아 패치 번호를 1 올립니다. (태그가 없으면 `0.0.1`)
+2. `swift test`로 테스트를 돌립니다.
+3. universal `Wiret.app`을 빌드하고 버전 정보를 `Info.plist`에 기록합니다.
+4. `ditto`로 앱 번들을 압축합니다.
+5. `vx.y.z-SNAPSHOT` 태그로 프리릴리스를 만들고, `snapshot-latest` 릴리스를 최신 빌드로 교체합니다.
+
+`workflow_dispatch`로 수동 실행도 할 수 있습니다.

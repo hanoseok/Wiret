@@ -1,0 +1,150 @@
+name: Snapshot Build
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# 동시에 여러 스냅샷 빌드가 돌면 버전이 겹치므로 순차 실행한다
+concurrency:
+  group: snapshot-build
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: macos-15
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 다음 스냅샷 버전 계산
+        id: version
+        run: |
+          set -euo pipefail
+          git fetch --tags --force --quiet
+          latest="$(git tag -l 'v*.*.*-SNAPSHOT' | sed -e 's/^v//' -e 's/-SNAPSHOT$//' | sort -V | tail -n 1)"
+          if [ -z "$latest" ]; then
+            version="0.0.1"
+          else
+            major="${latest%%.*}"
+            rest="${latest#*.}"
+            minor="${rest%%.*}"
+            patch="${rest#*.}"
+            version="${major}.${minor}.$((patch + 1))"
+          fi
+          {
+            echo "version=${version}"
+            echo "full=${version}-SNAPSHOT"
+            echo "tag=v${version}-SNAPSHOT"
+          } >> "$GITHUB_OUTPUT"
+          echo "이전 스냅샷: ${latest:-없음} / 이번 스냅샷: ${version}-SNAPSHOT"
+
+      - name: 테스트
+        run: swift test
+
+      - name: .app 빌드 (universal)
+        env:
+          UNIVERSAL: "1"
+          MARKETING_VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./build_app.sh
+
+      - name: 압축
+        env:
+          FULL: ${{ steps.version.outputs.full }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent build/Wiret.app "dist/Wiret-${FULL}.zip"
+          cp "dist/Wiret-${FULL}.zip" dist/Wiret-snapshot.zip
+          ls -lh dist
+
+      - name: 릴리스 노트 작성
+        env:
+          FULL: ${{ steps.version.outputs.full }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cat > dist/notes.md <<EOF
+          \`develop\` 브랜치 자동 스냅샷 빌드입니다.
+
+          - 버전: \`${FULL}\`
+          - 커밋: ${GITHUB_SHA}
+          - 빌드 번호: ${GITHUB_RUN_NUMBER}
+          - 아키텍처: Apple Silicon + Intel (universal)
+
+          ## 설치 방법
+
+          1. 아래 \`Wiret-${FULL}.zip\` 을 내려받아 압축을 풉니다.
+          2. \`Wiret.app\` 을 \`/Applications\` 로 옮깁니다.
+          3. 개발자 서명이 없는 앱이라 첫 실행 전에 격리 속성을 제거해야 합니다.
+
+          \`\`\`bash
+          xattr -dr com.apple.quarantine /Applications/Wiret.app
+          open /Applications/Wiret.app
+          \`\`\`
+
+          ## 고정 다운로드 주소 (항상 최신 스냅샷)
+
+          https://github.com/${GITHUB_REPOSITORY}/releases/download/snapshot-latest/Wiret-snapshot.zip
+          EOF
+
+      - name: 버전별 릴리스 생성
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FULL: ${{ steps.version.outputs.full }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" "dist/Wiret-${FULL}.zip" \
+            --target "$GITHUB_SHA" \
+            --title "Wiret ${FULL}" \
+            --notes-file dist/notes.md \
+            --prerelease
+
+      - name: 최신 스냅샷 릴리스 갱신
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FULL: ${{ steps.version.outputs.full }}
+        run: |
+          set -euo pipefail
+          if gh release view snapshot-latest >/dev/null 2>&1; then
+            gh release delete snapshot-latest --yes --cleanup-tag
+          fi
+          gh release create snapshot-latest dist/Wiret-snapshot.zip \
+            --target "$GITHUB_SHA" \
+            --title "최신 스냅샷 (${FULL})" \
+            --notes-file dist/notes.md \
+            --prerelease
+
+      - name: 빌드 아티팩트 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wiret-${{ steps.version.outputs.full }}
+          path: dist/Wiret-${{ steps.version.outputs.full }}.zip
+          retention-days: 30
+
+      - name: 요약
+        env:
+          FULL: ${{ steps.version.outputs.full }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Wiret ${FULL}"
+            echo ""
+            echo "| 항목 | 값 |"
+            echo "| --- | --- |"
+            echo "| 버전 | \`${FULL}\` |"
+            echo "| 태그 | [\`${TAG}\`](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}) |"
+            echo ""
+            echo "### 다운로드"
+            echo ""
+            echo "- 이번 버전: https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Wiret-${FULL}.zip"
+            echo "- 항상 최신: https://github.com/${GITHUB_REPOSITORY}/releases/download/snapshot-latest/Wiret-snapshot.zip"
+          } >> "$GITHUB_STEP_SUMMARY"
