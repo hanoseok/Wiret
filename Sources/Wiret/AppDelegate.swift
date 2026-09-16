@@ -186,13 +186,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let button = statusItem.button {
             switch state {
             case .idle:
-                let image = NSImage(systemSymbolName: "mic", accessibilityDescription: "Wiret")
-                image?.isTemplate = true
-                button.image = image
+                button.image = MouseIcon.menuBarImage(recording: false)
                 button.contentTintColor = nil
             case .recording:
-                let image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Wiret")
-                button.image = image
+                button.image = MouseIcon.menuBarImage(recording: true)
                 button.contentTintColor = .systemRed
             }
         }

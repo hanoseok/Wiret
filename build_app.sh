@@ -23,6 +23,12 @@ cp "$BIN" "$APP/Contents/MacOS/Wiret"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 echo -n "APPL????" > "$APP/Contents/PkgInfo"
 
+# 앱 아이콘은 저장소에 바이너리로 두지 않고 MouseIcon.swift 에서 매번 생성한다.
+ICONSET="$(mktemp -d)/Wiret.iconset"
+cat Sources/Wiret/MouseIcon.swift Scripts/export_app_icon_main.swift | swift - "$ICONSET"
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+rm -rf "$(dirname "$ICONSET")"
+
 PLIST="$APP/Contents/Info.plist"
 if [[ -n "${MARKETING_VERSION:-}" ]]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MARKETING_VERSION" "$PLIST"
