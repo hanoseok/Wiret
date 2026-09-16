@@ -11,10 +11,32 @@ private final class StubShortcutRunner: ShortcutRunning {
     func run(shortcutName: String, inputPath: String) -> ShortcutRunResult { resultToReturn }
 }
 
+private final class StubShortcutInstaller: ShortcutInstalling {
+    var signResult = ShortcutRunResult(exitCode: 0, errorOutput: "")
+    private(set) var signCount = 0
+    private(set) var openedURLs: [URL] = []
+    private(set) var viewedNames: [String] = []
+
+    func sign(unsigned: URL, signed: URL) -> ShortcutRunResult {
+        signCount += 1
+        // 서명 성공을 흉내내려면 출력 파일이 있어야 한다.
+        try? Data("signed".utf8).write(to: signed)
+        return signResult
+    }
+
+    func open(_ url: URL) { openedURLs.append(url) }
+
+    func view(shortcutNamed name: String) -> ShortcutRunResult {
+        viewedNames.append(name)
+        return ShortcutRunResult(exitCode: 0, errorOutput: "")
+    }
+}
+
 final class AppDelegateTests: XCTestCase {
     private let suiteName = "WiretAppDelegateTests"
     private var delegate: AppDelegate!
     private var shortcutRunner: StubShortcutRunner!
+    private var shortcutInstaller: StubShortcutInstaller!
 
     override func setUp() {
         super.setUp()
@@ -23,9 +45,11 @@ final class AppDelegateTests: XCTestCase {
         testDefaults.removePersistentDomain(forName: suiteName)
         _ = NSApplication.shared
         shortcutRunner = StubShortcutRunner()
+        shortcutInstaller = StubShortcutInstaller()
         delegate = AppDelegate(
             defaults: testDefaults,
-            voiceMemosImporter: VoiceMemosImporter(runner: shortcutRunner)
+            voiceMemosImporter: VoiceMemosImporter(runner: shortcutRunner),
+            shortcutInstaller: VoiceMemosShortcutInstaller(installer: shortcutInstaller)
         )
         delegate.suppressAlertsForTesting = true
         delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
@@ -35,6 +59,7 @@ final class AppDelegateTests: XCTestCase {
         NSStatusBar.system.removeStatusItem(delegate.statusItem)
         UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
         shortcutRunner = nil
+        shortcutInstaller = nil
         delegate = nil
         super.tearDown()
     }
@@ -44,15 +69,16 @@ final class AppDelegateTests: XCTestCase {
             XCTFail("menu missing")
             return
         }
-        XCTAssertEqual(menu.items.count, 8)
+        XCTAssertEqual(menu.items.count, 9)
         XCTAssertEqual(menu.items[0].title, "녹음 시작")
         XCTAssertEqual(menu.items[1].title, "녹음 중단")
         XCTAssertTrue(menu.items[2].isSeparatorItem)
         XCTAssertEqual(menu.items[3].title, "자동")
         XCTAssertFalse(menu.items[4].isEnabled)
         XCTAssertEqual(menu.items[5].title, "음성 메모로 보내기")
-        XCTAssertTrue(menu.items[6].isSeparatorItem)
-        XCTAssertEqual(menu.items[7].title, "종료")
+        XCTAssertEqual(menu.items[6].title, "음성 메모 단축어 삭제")
+        XCTAssertTrue(menu.items[7].isSeparatorItem)
+        XCTAssertEqual(menu.items[8].title, "종료")
         XCTAssertFalse(menu.autoenablesItems)
     }
 
@@ -152,5 +178,100 @@ final class AppDelegateTests: XCTestCase {
         delegate.handleVoiceMemosImportFailure(.shortcutFailed("일시 오류"))
 
         XCTAssertTrue(delegate.isVoiceMemosImportEnabled)
+    }
+
+    // MARK: - 단축어 설치/삭제
+
+    private func toggleShortcutItem() {
+        guard let action = delegate.shortcutItem?.action else {
+            return XCTFail("단축어 항목이 없습니다")
+        }
+        _ = delegate.perform(action)
+    }
+
+    /// 설치와 삭제 중 지금 할 수 있는 쪽 하나만 보여야 한다.
+    func testShortcutItemShowsInstallWhenMissing() {
+        shortcutRunner.installedNames = []
+        delegate.refreshShortcutItem()
+
+        XCTAssertEqual(delegate.shortcutItem.title, "음성 메모 단축어 설치")
+    }
+
+    func testShortcutItemShowsRemoveWhenInstalled() {
+        delegate.refreshShortcutItem()
+
+        XCTAssertEqual(delegate.shortcutItem.title, "음성 메모 단축어 삭제")
+    }
+
+    /// 단축어는 Wiret 밖에서도 추가·삭제되므로 메뉴를 열 때 상태를 다시 읽어야 한다.
+    func testMenuWillOpenRefreshesShortcutItem() {
+        XCTAssertEqual(delegate.shortcutItem.title, "음성 메모 단축어 삭제")
+
+        shortcutRunner.installedNames = []
+        delegate.menuWillOpen(NSMenu())
+
+        XCTAssertEqual(delegate.shortcutItem.title, "음성 메모 단축어 설치")
+    }
+
+    func testInstallingSignsAndHandsFileToShortcutsApp() {
+        shortcutRunner.installedNames = []
+        delegate.refreshShortcutItem()
+
+        toggleShortcutItem()
+
+        XCTAssertEqual(shortcutInstaller.signCount, 1)
+        XCTAssertEqual(shortcutInstaller.openedURLs.count, 1)
+        XCTAssertEqual(shortcutInstaller.openedURLs.first?.pathExtension, "shortcut")
+    }
+
+    /// 서명이 실패했는데 단축어 앱을 여는 것은 사용자를 헷갈리게 한다.
+    func testFailedSigningDoesNotOpenShortcutsApp() {
+        shortcutRunner.installedNames = []
+        shortcutInstaller.signResult = ShortcutRunResult(exitCode: 1, errorOutput: "형식 오류")
+        delegate.refreshShortcutItem()
+
+        toggleShortcutItem()
+
+        XCTAssertTrue(shortcutInstaller.openedURLs.isEmpty)
+    }
+
+    func testRemovingOpensShortcutInShortcutsApp() {
+        delegate.refreshShortcutItem()
+
+        toggleShortcutItem()
+
+        XCTAssertEqual(shortcutInstaller.viewedNames, [VoiceMemosImporter.defaultShortcutName])
+        XCTAssertEqual(shortcutInstaller.signCount, 0)
+    }
+
+    // MARK: - 자동 녹음과 단축어
+
+    /// 자동 녹음을 켜는 시점에는 단축어가 준비돼 있어야 한다.
+    func testEnablingAutoInstallsShortcutWhenMissing() {
+        shortcutRunner.installedNames = []
+
+        delegate.perform(#selector(AppDelegate.toggleAutoForTesting))
+
+        XCTAssertEqual(shortcutInstaller.signCount, 1)
+        XCTAssertEqual(delegate.autoItem.state, .on)
+    }
+
+    func testEnablingAutoDoesNotReinstallExistingShortcut() {
+        delegate.perform(#selector(AppDelegate.toggleAutoForTesting))
+
+        XCTAssertEqual(shortcutInstaller.signCount, 0)
+        XCTAssertEqual(delegate.autoItem.state, .on)
+    }
+
+    /// 자동을 끌 때는 단축어를 건드릴 이유가 없다.
+    func testDisablingAutoDoesNotInstallShortcut() {
+        shortcutRunner.installedNames = []
+        delegate.perform(#selector(AppDelegate.toggleAutoForTesting))  // 켜기
+        let afterEnable = shortcutInstaller.signCount
+
+        delegate.perform(#selector(AppDelegate.toggleAutoForTesting))  // 끄기
+
+        XCTAssertEqual(shortcutInstaller.signCount, afterEnable)
+        XCTAssertEqual(delegate.autoItem.state, .off)
     }
 }

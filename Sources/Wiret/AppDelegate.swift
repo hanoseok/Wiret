@@ -1,10 +1,11 @@
 import AppKit
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let recorder = AudioRecorder()
     private let calendarSource = EventKitMeetingSource()
     private let defaults: UserDefaults
     private let voiceMemosImporter: VoiceMemosImporter
+    private let shortcutInstaller: VoiceMemosShortcutInstaller
     private(set) lazy var coordinator = AutoRecordingCoordinator(source: calendarSource, defaults: defaults)
 
     var state: RecordingState = .idle {
@@ -17,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var autoItem: NSMenuItem!
     private(set) var autoStatusItem: NSMenuItem!
     private(set) var voiceMemosItem: NSMenuItem!
+    private(set) var shortcutItem: NSMenuItem!
 
     /// A start request that never completes (a permission prompt left open, say) must not block auto
     /// recording forever.
@@ -34,10 +36,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     init(
         defaults: UserDefaults = .standard,
-        voiceMemosImporter: VoiceMemosImporter = VoiceMemosImporter()
+        voiceMemosImporter: VoiceMemosImporter = VoiceMemosImporter(),
+        shortcutInstaller: VoiceMemosShortcutInstaller = VoiceMemosShortcutInstaller()
     ) {
         self.defaults = defaults
         self.voiceMemosImporter = voiceMemosImporter
+        self.shortcutInstaller = shortcutInstaller
         super.init()
     }
 
@@ -91,12 +95,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         voiceMemosItem.state = isVoiceMemosImportEnabled ? .on : .off
         menu.addItem(voiceMemosItem)
 
+        shortcutItem = NSMenuItem(
+            title: shortcutItemTitle,
+            action: #selector(toggleShortcutInstallation),
+            keyEquivalent: ""
+        )
+        shortcutItem.target = self
+        menu.addItem(shortcutItem)
+
         menu.addItem(NSMenuItem.separator())
 
         let quitItem = NSMenuItem(title: "종료", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
 
+        // 단축어는 Wiret 밖에서도 추가·삭제되므로 메뉴를 열 때마다 상태를 다시 읽는다.
+        menu.delegate = self
         statusItem.menu = menu
 
         recorder.onUnexpectedStop = { [weak self] error in
@@ -255,9 +269,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func menuWillOpen(_ menu: NSMenu) {
+        refreshShortcutItem()
+    }
+
+    /// 단축어가 이미 있으면 삭제를, 없으면 설치를 제안한다. 둘 중 하나만 보인다.
+    var shortcutItemTitle: String {
+        voiceMemosImporter.isShortcutInstalled ? "음성 메모 단축어 삭제" : "음성 메모 단축어 설치"
+    }
+
+    func refreshShortcutItem() {
+        shortcutItem?.title = shortcutItemTitle
+    }
+
+    @objc private func toggleShortcutInstallation() {
+        if voiceMemosImporter.isShortcutInstalled {
+            requestShortcutRemoval()
+        } else {
+            installShortcut()
+        }
+        refreshShortcutItem()
+    }
+
+    @discardableResult
+    func installShortcut() -> Bool {
+        switch shortcutInstaller.install() {
+        case .success:
+            showShortcutInstallAlert()
+            return true
+        case .failure(let error):
+            showShortcutErrorAlert(error)
+            return false
+        }
+    }
+
+    private func requestShortcutRemoval() {
+        // macOS는 앱이 단축어를 직접 지우는 것을 허용하지 않는다. 단축어 앱에서 열어주는 것까지가 한계다.
+        shortcutInstaller.openForRemoval()
+        showShortcutRemovalAlert()
+    }
+
+    /// 테스트에서 메뉴 동작을 그대로 호출하기 위한 통로.
+    @objc func toggleAutoForTesting() {
+        toggleAuto()
+    }
+
     @objc private func toggleAuto() {
-        coordinator.setEnabled(!coordinator.isEnabled)
+        let willEnable = !coordinator.isEnabled
+
+        // 자동 녹음을 켜는 시점에는 음성 메모 단축어가 준비돼 있어야 한다. 없으면 바로 설치를 띄운다.
+        if willEnable, !voiceMemosImporter.isShortcutInstalled {
+            installShortcut()
+        }
+
+        coordinator.setEnabled(willEnable)
         autoItem.state = coordinator.isEnabled ? .on : .off
+        refreshShortcutItem()
     }
 
     @objc private func toggleVoiceMemosImport() {
@@ -266,10 +333,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // 단축어가 없으면 녹음이 끝날 때마다 실패하므로, 켜는 시점에 먼저 확인하고 만드는 법을 안내한다.
+        // 단축어가 없으면 녹음이 끝날 때마다 실패한다. 켜는 시점에 바로 단축어를 만들어 주고,
+        // 사용자가 단축어 앱에서 추가를 끝낼 때까지는 켜지 않는다. "켜짐"이 곧 "동작함"이어야 한다.
         guard voiceMemosImporter.isShortcutInstalled else {
             setVoiceMemosImport(enabled: false)
-            showShortcutSetupAlert()
+            installShortcut()
+            refreshShortcutItem()
             return
         }
         setVoiceMemosImport(enabled: true)
@@ -395,28 +464,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func showShortcutSetupAlert() {
+    private func showShortcutInstallAlert() {
         if suppressAlertsForTesting { return }
         NSApp.activate(ignoringOtherApps: true)
 
         let alert = NSAlert()
-        alert.messageText = "\"\(VoiceMemosImporter.defaultShortcutName)\" 단축어가 필요합니다"
+        alert.messageText = "단축어 앱에서 추가를 눌러주세요"
         alert.informativeText = """
-        음성 메모 앱은 외부 앱이 파일을 직접 넣을 수 없고, 단축어의 "녹음 가져오기" 동작으로만 추가할 수 있습니다. 단축어 앱에서 한 번만 만들어 주세요.
+        \(VoiceMemosImporter.defaultShortcutName) 단축어를 만들어 단축어 앱에 넘겼습니다. 열린 창에서 "단축어 추가"를 누르면 설정이 끝납니다.
 
-        1. 단축어 앱을 열고 새 단축어를 만듭니다.
-        2. "입력을 받기"를 켜고 입력 종류를 파일로 둡니다.
-        3. 음성 메모의 "녹음 가져오기" 동작을 추가하고 오디오 파일에 단축어 입력을 연결합니다.
-        4. 단축어 이름을 \(VoiceMemosImporter.defaultShortcutName) 으로 저장합니다.
+        음성 메모의 "녹음 가져오기" 동작은 단축어 목록에서 검색되지 않아 직접 만들 수 없기 때문에, Wiret이 대신 만들어 드립니다.
         """
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "단축어 앱 열기")
-        alert.addButton(withTitle: "취소")
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn,
-           let url = URL(string: "shortcuts://create-shortcut") {
-            NSWorkspace.shared.open(url)
-        }
+        alert.addButton(withTitle: "확인")
+        alert.runModal()
+    }
+
+    private func showShortcutRemovalAlert() {
+        if suppressAlertsForTesting { return }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "단축어 앱에서 삭제해주세요"
+        alert.informativeText = "macOS는 앱이 단축어를 직접 지우는 것을 허용하지 않습니다. 단축어 앱에서 \(VoiceMemosImporter.defaultShortcutName)을 열어 두었으니, 목록에서 선택한 뒤 ⌘⌫ 로 삭제해주세요."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "확인")
+        alert.runModal()
+    }
+
+    private func showShortcutErrorAlert(_ error: VoiceMemosShortcutError) {
+        if suppressAlertsForTesting { return }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "단축어를 만들지 못했습니다"
+        alert.informativeText = error.errorDescription ?? ""
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "확인")
+        alert.runModal()
     }
 
     private func showVoiceMemosErrorAlert(_ error: VoiceMemosImportError) {

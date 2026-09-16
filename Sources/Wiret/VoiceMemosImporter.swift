@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// 음성 메모 앱은 외부에서 파일을 넣을 공개 경로가 하나뿐이다.
@@ -95,7 +96,7 @@ final class VoiceMemosImporter {
 }
 
 /// `/usr/bin/shortcuts`를 호출하는 실제 구현.
-final class ShortcutsCommandRunner: ShortcutRunning {
+final class ShortcutsCommandRunner: ShortcutRunning, ShortcutInstalling {
     private static let executable = URL(fileURLWithPath: "/usr/bin/shortcuts")
 
     /// 단축어 실행이 멈춰도 앱 종료를 막지 않도록 상한을 둔다.
@@ -116,6 +117,24 @@ final class ShortcutsCommandRunner: ShortcutRunning {
 
     func run(shortcutName: String, inputPath: String) -> ShortcutRunResult {
         let result = execute(arguments: ["run", shortcutName, "--input-path", inputPath])
+        return ShortcutRunResult(exitCode: result.exitCode, errorOutput: result.standardError)
+    }
+
+    // MARK: - ShortcutInstalling
+
+    func sign(unsigned: URL, signed: URL) -> ShortcutRunResult {
+        let result = execute(arguments: [
+            "sign", "--mode", "anyone", "--input", unsigned.path, "--output", signed.path
+        ])
+        return ShortcutRunResult(exitCode: result.exitCode, errorOutput: result.standardError)
+    }
+
+    func open(_ url: URL) {
+        NSWorkspace.shared.open(url)
+    }
+
+    func view(shortcutNamed name: String) -> ShortcutRunResult {
+        let result = execute(arguments: ["view", name])
         return ShortcutRunResult(exitCode: result.exitCode, errorOutput: result.standardError)
     }
 
