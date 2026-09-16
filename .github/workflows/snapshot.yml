@@ -18,7 +18,7 @@ jobs:
     runs-on: macos-15
     steps:
       - name: 체크아웃
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -123,7 +123,7 @@ jobs:
             --prerelease
 
       - name: 빌드 아티팩트 업로드
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Wiret-${{ steps.version.outputs.full }}
           path: dist/Wiret-${{ steps.version.outputs.full }}.zip
