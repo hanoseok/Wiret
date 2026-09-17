@@ -26,6 +26,9 @@ private final class FakeMeetingSource: MeetingSource {
     func meetings(from: Date, to: Date) -> [Meeting] {
         meetingsToReturn
     }
+
+    var availableCalendars: [CalendarInfo] = []
+    var selectedCalendarIDs: Set<String> = []
 }
 
 private final class FakeSleepPreventer: SleepPreventing {

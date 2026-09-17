@@ -5,6 +5,10 @@ protocol MeetingSource: AnyObject {
     var onChange: (() -> Void)? { get set }
     func requestAccess(completion: @escaping (Bool) -> Void)
     func meetings(from: Date, to: Date) -> [Meeting]
+    /// 메뉴에 보여줄 전체 캘린더 목록.
+    var availableCalendars: [CalendarInfo] { get }
+    /// 사용자가 고른 캘린더. 비어 있으면 자동(Google 우선)으로 동작한다.
+    var selectedCalendarIDs: Set<String> { get set }
 }
 
 final class EventKitMeetingSource: MeetingSource {
@@ -12,6 +16,9 @@ final class EventKitMeetingSource: MeetingSource {
     private var changeObserver: NSObjectProtocol?
 
     var onChange: (() -> Void)?
+
+    /// 비어 있으면 자동으로 Google 캘린더를 고른다. 자세한 규칙은 `CalendarSelection` 참고.
+    var selectedCalendarIDs: Set<String> = []
 
     init() {
         changeObserver = NotificationCenter.default.addObserver(
@@ -80,9 +87,21 @@ final class EventKitMeetingSource: MeetingSource {
         }
     }
 
+    var availableCalendars: [CalendarInfo] {
+        store.calendars(for: .event).map {
+            CalendarInfo(id: $0.calendarIdentifier, title: $0.title, sourceTitle: $0.source.title)
+        }
+    }
+
     var calendars: [EKCalendar] {
-        let google = googleCalendars
-        return google.isEmpty ? store.calendars(for: .event) : google
+        let all = store.calendars(for: .event)
+        let resolved = CalendarSelection.resolve(
+            all: all.map { CalendarInfo(id: $0.calendarIdentifier, title: $0.title, sourceTitle: $0.source.title) },
+            googleIDs: Set(googleCalendars.map(\.calendarIdentifier)),
+            selected: selectedCalendarIDs
+        )
+        let resolvedIDs = Set(resolved.map(\.id))
+        return all.filter { resolvedIDs.contains($0.calendarIdentifier) }
     }
 
     func meetings(from start: Date, to end: Date) -> [Meeting] {

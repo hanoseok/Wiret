@@ -32,11 +32,21 @@ private final class StubShortcutInstaller: ShortcutInstalling {
     }
 }
 
+private final class StubMeetingSource: MeetingSource {
+    var onChange: (() -> Void)?
+    var availableCalendars: [CalendarInfo] = []
+    var selectedCalendarIDs: Set<String> = []
+
+    func requestAccess(completion: @escaping (Bool) -> Void) { completion(true) }
+    func meetings(from: Date, to: Date) -> [Meeting] { [] }
+}
+
 final class AppDelegateTests: XCTestCase {
     private let suiteName = "WiretAppDelegateTests"
     private var delegate: AppDelegate!
     private var shortcutRunner: StubShortcutRunner!
     private var shortcutInstaller: StubShortcutInstaller!
+    private var calendarSource: StubMeetingSource!
 
     override func setUp() {
         super.setUp()
@@ -46,10 +56,16 @@ final class AppDelegateTests: XCTestCase {
         _ = NSApplication.shared
         shortcutRunner = StubShortcutRunner()
         shortcutInstaller = StubShortcutInstaller()
+        calendarSource = StubMeetingSource()
+        calendarSource.availableCalendars = [
+            CalendarInfo(id: "work", title: "업무", sourceTitle: "aston@kakaocorp.com"),
+            CalendarInfo(id: "personal", title: "개인", sourceTitle: "aston@gmail.com")
+        ]
         delegate = AppDelegate(
             defaults: testDefaults,
             voiceMemosImporter: VoiceMemosImporter(runner: shortcutRunner),
-            shortcutInstaller: VoiceMemosShortcutInstaller(installer: shortcutInstaller)
+            shortcutInstaller: VoiceMemosShortcutInstaller(installer: shortcutInstaller),
+            calendarSource: calendarSource
         )
         delegate.suppressAlertsForTesting = true
         delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
@@ -60,6 +76,7 @@ final class AppDelegateTests: XCTestCase {
         UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
         shortcutRunner = nil
         shortcutInstaller = nil
+        calendarSource = nil
         delegate = nil
         super.tearDown()
     }
@@ -69,16 +86,18 @@ final class AppDelegateTests: XCTestCase {
             XCTFail("menu missing")
             return
         }
-        XCTAssertEqual(menu.items.count, 9)
+        XCTAssertEqual(menu.items.count, 10)
         XCTAssertEqual(menu.items[0].title, "녹음 시작")
         XCTAssertEqual(menu.items[1].title, "녹음 중단")
         XCTAssertTrue(menu.items[2].isSeparatorItem)
         XCTAssertEqual(menu.items[3].title, "자동")
         XCTAssertFalse(menu.items[4].isEnabled)
-        XCTAssertEqual(menu.items[5].title, "음성 메모로 보내기")
-        XCTAssertEqual(menu.items[6].title, "음성 메모 단축어 삭제")
-        XCTAssertTrue(menu.items[7].isSeparatorItem)
-        XCTAssertEqual(menu.items[8].title, "종료")
+        XCTAssertEqual(menu.items[5].title, "캘린더")
+        XCTAssertNotNil(menu.items[5].submenu)
+        XCTAssertEqual(menu.items[6].title, "음성 메모로 보내기")
+        XCTAssertEqual(menu.items[7].title, "음성 메모 단축어 삭제")
+        XCTAssertTrue(menu.items[8].isSeparatorItem)
+        XCTAssertEqual(menu.items[9].title, "종료")
         XCTAssertFalse(menu.autoenablesItems)
     }
 
@@ -273,5 +292,103 @@ final class AppDelegateTests: XCTestCase {
 
         XCTAssertEqual(shortcutInstaller.signCount, afterEnable)
         XCTAssertEqual(delegate.autoItem.state, .off)
+    }
+
+    // MARK: - 캘린더 선택
+
+    private var calendarMenu: NSMenu {
+        delegate.calendarItem.submenu!
+    }
+
+    private func calendarMenuItem(titled title: String) -> NSMenuItem? {
+        calendarMenu.items.first { $0.title == title }
+    }
+
+    private func clickCalendarItem(titled title: String) {
+        guard let item = calendarMenuItem(titled: title), let action = item.action else {
+            return XCTFail("\(title) 항목이 없습니다")
+        }
+        _ = delegate.perform(action, with: item)
+    }
+
+    func testCalendarMenuListsEveryCalendar() {
+        XCTAssertEqual(calendarMenu.items.map(\.title), ["자동 (Google 캘린더)", "", "업무", "개인"])
+    }
+
+    /// 계정을 골라 두지 않았으면 예전 동작(Google 캘린더)이 켜져 있어야 한다.
+    func testAutomaticIsSelectedByDefault() {
+        XCTAssertEqual(calendarMenuItem(titled: "자동 (Google 캘린더)")?.state, .on)
+        XCTAssertEqual(calendarMenuItem(titled: "업무")?.state, .off)
+    }
+
+    func testSelectingCalendarChecksItAndClearsAutomatic() {
+        clickCalendarItem(titled: "업무")
+
+        XCTAssertEqual(delegate.selectedCalendarIDs, ["work"])
+        XCTAssertEqual(calendarMenuItem(titled: "업무")?.state, .on)
+        XCTAssertEqual(calendarMenuItem(titled: "자동 (Google 캘린더)")?.state, .off)
+    }
+
+    func testSelectingSeveralCalendarsKeepsBoth() {
+        clickCalendarItem(titled: "업무")
+        clickCalendarItem(titled: "개인")
+
+        XCTAssertEqual(delegate.selectedCalendarIDs, ["work", "personal"])
+    }
+
+    func testClickingSelectedCalendarUnselectsIt() {
+        clickCalendarItem(titled: "업무")
+        clickCalendarItem(titled: "업무")
+
+        XCTAssertTrue(delegate.selectedCalendarIDs.isEmpty)
+        XCTAssertEqual(calendarMenuItem(titled: "자동 (Google 캘린더)")?.state, .on)
+    }
+
+    func testChoosingAutomaticClearsSelection() {
+        clickCalendarItem(titled: "업무")
+
+        clickCalendarItem(titled: "자동 (Google 캘린더)")
+
+        XCTAssertTrue(delegate.selectedCalendarIDs.isEmpty)
+    }
+
+    /// 선택이 캘린더 소스에 전달되지 않으면 메뉴만 바뀌고 실제 녹음 대상은 그대로다.
+    func testSelectionIsPushedToTheCalendarSource() {
+        clickCalendarItem(titled: "업무")
+
+        XCTAssertEqual(calendarSource.selectedCalendarIDs, ["work"])
+    }
+
+    func testSelectionSurvivesRelaunch() {
+        clickCalendarItem(titled: "업무")
+
+        let relaunched = AppDelegate(
+            defaults: UserDefaults(suiteName: suiteName)!,
+            voiceMemosImporter: VoiceMemosImporter(runner: shortcutRunner),
+            shortcutInstaller: VoiceMemosShortcutInstaller(installer: shortcutInstaller),
+            calendarSource: calendarSource
+        )
+
+        XCTAssertEqual(relaunched.selectedCalendarIDs, ["work"])
+    }
+
+    /// 캘린더는 계정 추가·삭제로 바뀌므로 메뉴를 열 때 다시 읽어야 한다.
+    func testOpeningCalendarMenuRereadsCalendars() {
+        calendarSource.availableCalendars.append(
+            CalendarInfo(id: "team", title: "팀", sourceTitle: "aston@kakaocorp.com")
+        )
+
+        delegate.menuWillOpen(calendarMenu)
+
+        XCTAssertEqual(calendarMenuItem(titled: "팀")?.state, .off)
+    }
+
+    func testCalendarMenuShowsPlaceholderWhenNoCalendarsAreReadable() {
+        calendarSource.availableCalendars = []
+
+        delegate.menuWillOpen(calendarMenu)
+
+        XCTAssertEqual(calendarMenu.items.map(\.title), ["자동 (Google 캘린더)", "캘린더를 읽을 수 없습니다"])
+        XCTAssertFalse(calendarMenu.items[1].isEnabled)
     }
 }

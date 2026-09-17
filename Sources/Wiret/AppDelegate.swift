@@ -2,7 +2,7 @@ import AppKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let recorder = AudioRecorder()
-    private let calendarSource = EventKitMeetingSource()
+    private let calendarSource: MeetingSource
     private let defaults: UserDefaults
     private let voiceMemosImporter: VoiceMemosImporter
     private let shortcutInstaller: VoiceMemosShortcutInstaller
@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private(set) var stopItem: NSMenuItem!
     private(set) var autoItem: NSMenuItem!
     private(set) var autoStatusItem: NSMenuItem!
+    private(set) var calendarItem: NSMenuItem!
     private(set) var voiceMemosItem: NSMenuItem!
     private(set) var shortcutItem: NSMenuItem!
 
@@ -37,15 +38,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     init(
         defaults: UserDefaults = .standard,
         voiceMemosImporter: VoiceMemosImporter = VoiceMemosImporter(),
-        shortcutInstaller: VoiceMemosShortcutInstaller = VoiceMemosShortcutInstaller()
+        shortcutInstaller: VoiceMemosShortcutInstaller = VoiceMemosShortcutInstaller(),
+        calendarSource: MeetingSource = EventKitMeetingSource()
     ) {
         self.defaults = defaults
+        self.calendarSource = calendarSource
         self.voiceMemosImporter = voiceMemosImporter
         self.shortcutInstaller = shortcutInstaller
         super.init()
     }
 
     private static let voiceMemosImportKey = "voiceMemosImportEnabled"
+    private static let selectedCalendarsKey = "selectedCalendarIDs"
+
+    /// 사용자가 고른 캘린더 식별자. 비어 있으면 자동(Google 우선)으로 동작한다.
+    var selectedCalendarIDs: Set<String> {
+        get { Set(defaults.stringArray(forKey: Self.selectedCalendarsKey) ?? []) }
+        set {
+            defaults.set(Array(newValue).sorted(), forKey: Self.selectedCalendarsKey)
+            calendarSource.selectedCalendarIDs = newValue
+        }
+    }
 
     /// 음성 메모 가져오기는 사용자가 단축어를 만들어 두어야 동작하므로 기본값은 꺼짐이다.
     var isVoiceMemosImportEnabled: Bool {
@@ -85,6 +98,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         autoStatusItem = NSMenuItem(title: "자동: 꺼짐", action: nil, keyEquivalent: "")
         autoStatusItem.isEnabled = false
         menu.addItem(autoStatusItem)
+
+        calendarItem = NSMenuItem(title: "캘린더", action: nil, keyEquivalent: "")
+        let calendarMenu = NSMenu()
+        calendarMenu.autoenablesItems = false
+        calendarMenu.delegate = self
+        calendarItem.submenu = calendarMenu
+        menu.addItem(calendarItem)
 
         voiceMemosItem = NSMenuItem(
             title: "음성 메모로 보내기",
@@ -132,6 +152,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         coordinator.onChoose = { [weak self] meetings in self?.presentMeetingChoice(meetings) }
         coordinator.onChoiceObsolete = { [weak self] in self?.dismissMeetingChoice() }
         autoItem.state = coordinator.isEnabled ? .on : .off
+        calendarSource.selectedCalendarIDs = selectedCalendarIDs
+        rebuildCalendarMenu()
         coordinator.start()
 
         // Waking from sleep: re-check immediately so a meeting that ended while asleep stops right
@@ -270,7 +292,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        // 캘린더는 계정 추가·삭제로 바뀌므로 열 때마다 다시 읽는다.
+        if menu === calendarItem?.submenu {
+            rebuildCalendarMenu()
+            return
+        }
         refreshShortcutItem()
+    }
+
+    // MARK: - 캘린더 선택
+
+    func rebuildCalendarMenu() {
+        guard let menu = calendarItem?.submenu else { return }
+        menu.removeAllItems()
+
+        let calendars = calendarSource.availableCalendars
+        let selected = selectedCalendarIDs
+
+        let automaticItem = NSMenuItem(
+            title: "자동 (Google 캘린더)",
+            action: #selector(selectAutomaticCalendars),
+            keyEquivalent: ""
+        )
+        automaticItem.target = self
+        automaticItem.state = CalendarSelection.isAutomatic(all: calendars, selected: selected) ? .on : .off
+        menu.addItem(automaticItem)
+
+        guard !calendars.isEmpty else {
+            let empty = NSMenuItem(title: "캘린더를 읽을 수 없습니다", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+            return
+        }
+
+        menu.addItem(NSMenuItem.separator())
+
+        for calendar in calendars {
+            let item = NSMenuItem(
+                title: calendar.title,
+                action: #selector(toggleCalendar(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = calendar.id
+            item.state = selected.contains(calendar.id) ? .on : .off
+            // 이름이 같은 캘린더가 여러 계정에 있을 수 있어 계정을 함께 보여준다.
+            item.toolTip = calendar.sourceTitle
+            menu.addItem(item)
+        }
+    }
+
+    @objc private func selectAutomaticCalendars() {
+        selectedCalendarIDs = []
+        applyCalendarSelectionChange()
+    }
+
+    @objc private func toggleCalendar(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        var selection = selectedCalendarIDs
+        if selection.contains(id) {
+            selection.remove(id)
+        } else {
+            selection.insert(id)
+        }
+        selectedCalendarIDs = selection
+        applyCalendarSelectionChange()
+    }
+
+    private func applyCalendarSelectionChange() {
+        rebuildCalendarMenu()
+        // 바뀐 선택으로 지금 회의 상태를 다시 판단한다.
+        coordinator.tick()
     }
 
     /// 단축어가 이미 있으면 삭제를, 없으면 설치를 제안한다. 둘 중 하나만 보인다.
