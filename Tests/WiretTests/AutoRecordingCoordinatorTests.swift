@@ -753,4 +753,118 @@ final class AutoRecordingCoordinatorTests: XCTestCase {
         XCTAssertFalse(sleepPreventer.isActive)
         XCTAssertEqual(sleepPreventer.releaseCount, 1)
     }
+
+    // MARK: - 음성 메모가 직접 녹음 중일 때
+
+    private func inProgressMeeting(id: String = "m1", title: String = "Weekly Sync") -> Meeting {
+        Meeting(
+            id: id,
+            title: title,
+            start: currentDate.addingTimeInterval(-60),
+            end: currentDate.addingTimeInterval(600)
+        )
+    }
+
+    /// 사용자가 음성 메모로 직접 시작한 녹음이 우선이다. Wiret이 끼어들면 마이크를 두고 다툰다.
+    func testDoesNotAutoStartWhileVoiceMemosIsRecording() {
+        let coordinator = makeCoordinator()
+        var isRecording = false
+        coordinator.isRecordingProvider = { isRecording }
+        var startedMeeting: Meeting?
+        coordinator.onStart = { meeting in
+            startedMeeting = meeting
+            isRecording = true
+        }
+        var externalRecording = true
+        coordinator.isExternalRecordingProvider = { externalRecording }
+        source.meetingsToReturn = [inProgressMeeting()]
+
+        coordinator.setEnabled(true)
+        XCTAssertNil(startedMeeting, "음성 메모가 녹음 중인데 자동 녹음이 시작됐습니다")
+
+        // 음성 메모 녹음이 끝나면 평소대로 회의를 잡아야 한다.
+        externalRecording = false
+        coordinator.tick()
+
+        XCTAssertEqual(startedMeeting?.id, "m1")
+    }
+
+    func testDoesNotAutoStopWhileVoiceMemosIsRecording() {
+        let coordinator = makeCoordinator()
+        var isRecording = false
+        coordinator.isRecordingProvider = { isRecording }
+        coordinator.onStart = { _ in isRecording = true }
+        var stopCount = 0
+        coordinator.onStop = {
+            stopCount += 1
+            isRecording = false
+        }
+        var externalRecording = false
+        coordinator.isExternalRecordingProvider = { externalRecording }
+        source.meetingsToReturn = [inProgressMeeting()]
+
+        coordinator.setEnabled(true)
+        XCTAssertTrue(isRecording)
+
+        // 회의가 끝났지만 그 사이 음성 메모가 녹음을 시작했다.
+        externalRecording = true
+        currentDate = currentDate.addingTimeInterval(1200)
+        coordinator.tick()
+
+        XCTAssertEqual(stopCount, 0, "음성 메모가 녹음 중인데 자동 중단이 일어났습니다")
+    }
+
+    func testStatusTextExplainsWhyAutoIsWaiting() {
+        let coordinator = makeCoordinator()
+        coordinator.isRecordingProvider = { false }
+        coordinator.isExternalRecordingProvider = { true }
+        var statusText = ""
+        coordinator.onStatusText = { statusText = $0 }
+        source.meetingsToReturn = [inProgressMeeting()]
+
+        coordinator.setEnabled(true)
+
+        XCTAssertEqual(statusText, "자동: 음성 메모가 녹음 중이라 대기")
+    }
+
+    /// 자동이 꺼져 있으면 음성 메모 상태와 무관하게 "꺼짐"이 맞다.
+    func testDisabledStatusWinsOverExternalRecording() {
+        let coordinator = makeCoordinator()
+        coordinator.isExternalRecordingProvider = { true }
+        var statusText = ""
+        coordinator.onStatusText = { statusText = $0 }
+
+        coordinator.setEnabled(false)
+
+        XCTAssertEqual(statusText, "자동: 꺼짐")
+    }
+
+    /// 겹친 회의 선택 창을 남겨 두면 안 된다. 거기서 고르는 순간 자동 녹음이 시작되기 때문이다.
+    func testPendingChoiceIsDismissedWhenVoiceMemosStartsRecording() {
+        let coordinator = makeCoordinator()
+        coordinator.isRecordingProvider = { false }
+        var choiceObsoleteCount = 0
+        coordinator.onChoiceObsolete = { choiceObsoleteCount += 1 }
+        var presented: [Meeting] = []
+        coordinator.onChoose = { presented = $0 }
+        var externalRecording = false
+        coordinator.isExternalRecordingProvider = { externalRecording }
+        source.meetingsToReturn = [
+            inProgressMeeting(id: "m1", title: "A"),
+            Meeting(
+                id: "m2",
+                title: "B",
+                start: currentDate.addingTimeInterval(-30),
+                end: currentDate.addingTimeInterval(900)
+            )
+        ]
+
+        coordinator.setEnabled(true)
+        XCTAssertEqual(presented.count, 2)
+
+        externalRecording = true
+        coordinator.tick()
+
+        XCTAssertEqual(choiceObsoleteCount, 1)
+    }
 }

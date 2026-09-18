@@ -3,6 +3,7 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let recorder = AudioRecorder()
     private let calendarSource: MeetingSource
+    private let externalRecordingDetector: ExternalRecordingDetecting
     private let defaults: UserDefaults
     private let voiceMemosImporter: VoiceMemosImporter
     private let shortcutInstaller: VoiceMemosShortcutInstaller
@@ -39,10 +40,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         defaults: UserDefaults = .standard,
         voiceMemosImporter: VoiceMemosImporter = VoiceMemosImporter(),
         shortcutInstaller: VoiceMemosShortcutInstaller = VoiceMemosShortcutInstaller(),
-        calendarSource: MeetingSource = EventKitMeetingSource()
+        calendarSource: MeetingSource = EventKitMeetingSource(),
+        externalRecordingDetector: ExternalRecordingDetecting = CoreAudioRecordingDetector()
     ) {
         self.defaults = defaults
         self.calendarSource = calendarSource
+        self.externalRecordingDetector = externalRecordingDetector
         self.voiceMemosImporter = voiceMemosImporter
         self.shortcutInstaller = shortcutInstaller
         super.init()
@@ -141,6 +144,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         coordinator.isStartInFlightProvider = { [weak self] in
             guard let self, self.isStarting else { return false }
             return Date().timeIntervalSince(self.startRequestedAt) < Self.startInFlightTimeout
+        }
+        coordinator.isExternalRecordingProvider = { [weak self] in
+            self?.externalRecordingDetector.isVoiceMemosRecording ?? false
         }
         coordinator.onStart = { [weak self] meeting in self?.startAutoRecording(for: meeting) }
         coordinator.onStop = { [weak self] in self?.endRecording() }

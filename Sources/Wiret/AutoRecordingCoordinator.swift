@@ -28,6 +28,8 @@ final class AutoRecordingCoordinator {
     var onChoiceObsolete: (() -> Void)?
     var isRecordingProvider: (() -> Bool)?
     var isStartInFlightProvider: (() -> Bool)?
+    /// 음성 메모 앱이 직접 녹음 중인지. 그동안에는 자동 녹음도 자동 중단도 하지 않는다.
+    var isExternalRecordingProvider: (() -> Bool)?
     private(set) var autoMeetingId: String?
 
     init(
@@ -139,6 +141,18 @@ final class AutoRecordingCoordinator {
         let current = MeetingSchedule.currentAll(in: meetings, at: referenceDate)
         let next = MeetingSchedule.next(in: meetings, after: referenceDate)
 
+        // 음성 메모로 직접 녹음 중이면 Wiret은 끼어들지 않는다. 시작도, 중단도, 겹친 회의 선택도
+        // 하지 않는다. 사용자가 직접 시작한 녹음이 우선이다.
+        if isExternalRecordingProvider?() == true {
+            if pendingChoiceIds != nil {
+                clearPendingChoice()
+                onChoiceObsolete?()
+            }
+            updateStatusText(current: current, next: next)
+            updatePowerAssertion(current: current, next: next, at: referenceDate)
+            return
+        }
+
         let action = AutoRecordPolicy.decide(
             state: currentState(),
             current: current,
@@ -241,6 +255,11 @@ final class AutoRecordingCoordinator {
     private func updateStatusText(current: [Meeting], next: Meeting?) {
         guard isEnabled else {
             onStatusText?("자동: 꺼짐")
+            return
+        }
+
+        if isExternalRecordingProvider?() == true {
+            onStatusText?("자동: 음성 메모가 녹음 중이라 대기")
             return
         }
 
