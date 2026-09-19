@@ -37,8 +37,10 @@ private final class StubMeetingSource: MeetingSource {
     var availableCalendars: [CalendarInfo] = []
     var selectedCalendarIDs: Set<String> = []
 
+    var meetingsToReturn: [Meeting] = []
+
     func requestAccess(completion: @escaping (Bool) -> Void) { completion(true) }
-    func meetings(from: Date, to: Date) -> [Meeting] { [] }
+    func meetings(from: Date, to: Date) -> [Meeting] { meetingsToReturn }
 }
 
 final class AppDelegateTests: XCTestCase {
@@ -86,7 +88,7 @@ final class AppDelegateTests: XCTestCase {
             XCTFail("menu missing")
             return
         }
-        XCTAssertEqual(menu.items.count, 10)
+        XCTAssertEqual(menu.items.count, 11)
         XCTAssertEqual(menu.items[0].title, "녹음 시작")
         XCTAssertEqual(menu.items[1].title, "녹음 중단")
         XCTAssertTrue(menu.items[2].isSeparatorItem)
@@ -94,10 +96,11 @@ final class AppDelegateTests: XCTestCase {
         XCTAssertFalse(menu.items[4].isEnabled)
         XCTAssertEqual(menu.items[5].title, "캘린더")
         XCTAssertNotNil(menu.items[5].submenu)
-        XCTAssertEqual(menu.items[6].title, "음성 메모로 보내기")
-        XCTAssertEqual(menu.items[7].title, "음성 메모 단축어 삭제")
-        XCTAssertTrue(menu.items[8].isSeparatorItem)
-        XCTAssertEqual(menu.items[9].title, "종료")
+        XCTAssertEqual(menu.items[6].title, "오늘의 일정")
+        XCTAssertEqual(menu.items[7].title, "음성 메모로 보내기")
+        XCTAssertEqual(menu.items[8].title, "음성 메모 단축어 삭제")
+        XCTAssertTrue(menu.items[9].isSeparatorItem)
+        XCTAssertEqual(menu.items[10].title, "종료")
         XCTAssertFalse(menu.autoenablesItems)
     }
 
@@ -390,5 +393,67 @@ final class AppDelegateTests: XCTestCase {
 
         XCTAssertEqual(calendarMenu.items.map(\.title), ["자동 (Google 캘린더)", "캘린더를 읽을 수 없습니다"])
         XCTAssertFalse(calendarMenu.items[1].isEnabled)
+    }
+
+    // MARK: - 오늘의 일정
+
+    private func todayMeeting(id: String, hoursFromNow: Double) -> Meeting {
+        let start = Date().addingTimeInterval(hoursFromNow * 3600)
+        return Meeting(id: id, title: id, start: start, end: start.addingTimeInterval(1800))
+    }
+
+    func testTodayScheduleWindowListsTodaysMeetings() {
+        calendarSource.meetingsToReturn = [
+            todayMeeting(id: "m1", hoursFromNow: 1),
+            todayMeeting(id: "m2", hoursFromNow: 2)
+        ]
+
+        delegate.showTodaySchedule()
+
+        XCTAssertEqual(delegate.todayScheduleWindow?.checkboxes.count, 2)
+    }
+
+    /// 기본은 모두 포함이므로 처음 열면 전부 체크돼 있어야 한다.
+    func testTodayScheduleStartsWithEverythingIncluded() {
+        calendarSource.meetingsToReturn = [todayMeeting(id: "m1", hoursFromNow: 1)]
+
+        delegate.showTodaySchedule()
+
+        XCTAssertEqual(delegate.todayScheduleWindow?.checkboxes.first?.state, .on)
+    }
+
+    /// 체크를 끄면 그 회의가 자동 녹음 대상에서 빠지고, 창을 다시 열어도 유지돼야 한다.
+    func testUncheckingExcludesMeetingAndPersists() {
+        calendarSource.meetingsToReturn = [todayMeeting(id: "m1", hoursFromNow: 1)]
+        delegate.showTodaySchedule()
+
+        delegate.todayScheduleWindow?.toggleCheckbox(at: 0)
+        delegate.showTodaySchedule()
+
+        XCTAssertEqual(delegate.todayScheduleWindow?.checkboxes.first?.state, .off)
+    }
+
+    func testRecheckingIncludesMeetingAgain() {
+        calendarSource.meetingsToReturn = [todayMeeting(id: "m1", hoursFromNow: 1)]
+        delegate.showTodaySchedule()
+        delegate.todayScheduleWindow?.toggleCheckbox(at: 0)
+
+        delegate.showTodaySchedule()
+        delegate.todayScheduleWindow?.toggleCheckbox(at: 0)
+        delegate.showTodaySchedule()
+
+        XCTAssertEqual(delegate.todayScheduleWindow?.checkboxes.first?.state, .on)
+    }
+
+    /// 내일 일정까지 섞여 보이면 오늘 화면이 아니다.
+    func testTodayScheduleExcludesOtherDays() {
+        calendarSource.meetingsToReturn = [
+            todayMeeting(id: "today", hoursFromNow: 1),
+            todayMeeting(id: "tomorrow", hoursFromNow: 26)
+        ]
+
+        delegate.showTodaySchedule()
+
+        XCTAssertEqual(delegate.todayScheduleWindow?.checkboxes.count, 1)
     }
 }

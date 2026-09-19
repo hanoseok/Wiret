@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private(set) var autoItem: NSMenuItem!
     private(set) var autoStatusItem: NSMenuItem!
     private(set) var calendarItem: NSMenuItem!
+    private(set) var todayScheduleItem: NSMenuItem!
     private(set) var voiceMemosItem: NSMenuItem!
     private(set) var shortcutItem: NSMenuItem!
 
@@ -33,6 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     private var startRequestedAt = Date.distantPast
     private var choiceWindow: MeetingChoiceWindowController?
+    private(set) var todayScheduleWindow: TodayScheduleWindowController?
+    private lazy var exclusionStore = MeetingExclusionStore(defaults: defaults)
     private var wakeObserver: NSObjectProtocol?
     var suppressAlertsForTesting = false
 
@@ -109,6 +112,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         calendarItem.submenu = calendarMenu
         menu.addItem(calendarItem)
 
+        todayScheduleItem = NSMenuItem(
+            title: "오늘의 일정",
+            action: #selector(showTodaySchedule),
+            keyEquivalent: ""
+        )
+        todayScheduleItem.target = self
+        menu.addItem(todayScheduleItem)
+
         voiceMemosItem = NSMenuItem(
             title: "음성 메모로 보내기",
             action: #selector(toggleVoiceMemosImport),
@@ -148,6 +159,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         coordinator.isExternalRecordingProvider = { [weak self] in
             self?.externalRecordingDetector.isVoiceMemosRecording ?? false
         }
+        coordinator.excludedMeetingIdsProvider = { [weak self] in
+            self?.exclusionStore.excludedIDs ?? []
+        }
+        // 반복 일정은 회차마다 식별자가 달라 제외 기록이 쌓인다. 실행할 때 한 번 정리한다.
+        exclusionStore.prune()
         coordinator.onStart = { [weak self] meeting in self?.startAutoRecording(for: meeting) }
         coordinator.onStop = { [weak self] in self?.endRecording() }
         coordinator.onStatusText = { [weak self] text in self?.autoStatusItem.title = text }
@@ -502,6 +518,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let error {
             showErrorAlert(error)
         }
+    }
+
+    @objc func showTodaySchedule() {
+        let now = Date()
+        // 오늘 하루를 넉넉히 덮도록 앞뒤로 여유를 두고 읽는다.
+        let meetings = TodaySchedule.meetings(
+            in: calendarSource.meetings(
+                from: now.addingTimeInterval(-24 * 3600),
+                to: now.addingTimeInterval(24 * 3600)
+            ),
+            on: now
+        )
+
+        todayScheduleWindow?.dismiss()
+        let controller = TodayScheduleWindowController(
+            meetings: meetings,
+            date: now,
+            isExcluded: { [weak self] meeting in
+                self?.exclusionStore.isExcluded(meeting) ?? false
+            },
+            onToggle: { [weak self] meeting, excluded in
+                guard let self else { return }
+                self.exclusionStore.setExcluded(excluded, meeting: meeting)
+                // 지금 녹음 중인 회의를 뺐다면 곧바로 반영되어야 한다.
+                self.coordinator.tick()
+            }
+        )
+        todayScheduleWindow = controller
+        if suppressAlertsForTesting { return }
+        controller.show()
     }
 
     private func presentMeetingChoice(_ meetings: [Meeting]) {

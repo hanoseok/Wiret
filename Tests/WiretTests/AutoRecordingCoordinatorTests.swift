@@ -867,4 +867,94 @@ final class AutoRecordingCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(choiceObsoleteCount, 1)
     }
+
+    // MARK: - 오늘 일정에서 제외한 회의
+
+    /// 기본은 모두 포함이고, 뺀 회의만 자동 녹음 대상에서 빠진다.
+    func testExcludedMeetingIsNeverStarted() {
+        let coordinator = makeCoordinator()
+        coordinator.isRecordingProvider = { false }
+        var startedMeeting: Meeting?
+        coordinator.onStart = { startedMeeting = $0 }
+        coordinator.excludedMeetingIdsProvider = { ["m1"] }
+        source.meetingsToReturn = [inProgressMeeting(id: "m1")]
+
+        coordinator.setEnabled(true)
+
+        XCTAssertNil(startedMeeting, "제외한 회의가 자동 녹음됐습니다")
+    }
+
+    func testNonExcludedMeetingStillStarts() {
+        let coordinator = makeCoordinator()
+        coordinator.isRecordingProvider = { false }
+        var startedMeeting: Meeting?
+        coordinator.onStart = { startedMeeting = $0 }
+        coordinator.excludedMeetingIdsProvider = { ["다른-회의"] }
+        source.meetingsToReturn = [inProgressMeeting(id: "m1")]
+
+        coordinator.setEnabled(true)
+
+        XCTAssertEqual(startedMeeting?.id, "m1")
+    }
+
+    /// 녹음 중인 회의를 빼면 곧바로 멈춰야 한다. 그러지 않으면 뺀 의미가 없다.
+    func testExcludingTheRunningMeetingStopsIt() {
+        let coordinator = makeCoordinator()
+        var isRecording = false
+        coordinator.isRecordingProvider = { isRecording }
+        coordinator.onStart = { _ in isRecording = true }
+        var stopCount = 0
+        coordinator.onStop = {
+            stopCount += 1
+            isRecording = false
+        }
+        var excluded: Set<String> = []
+        coordinator.excludedMeetingIdsProvider = { excluded }
+        source.meetingsToReturn = [inProgressMeeting(id: "m1")]
+
+        coordinator.setEnabled(true)
+        XCTAssertTrue(isRecording)
+
+        excluded = ["m1"]
+        coordinator.tick()
+
+        XCTAssertEqual(stopCount, 1)
+    }
+
+    /// 겹친 회의 중 하나를 빼 두면 남은 하나가 바로 녹음돼야 한다. 선택 창이 뜨면 안 된다.
+    func testExcludingOneOfTwoOverlappingMeetingsSkipsThePrompt() {
+        let coordinator = makeCoordinator()
+        coordinator.isRecordingProvider = { false }
+        var presentedCount = 0
+        coordinator.onChoose = { _ in presentedCount += 1 }
+        var startedMeeting: Meeting?
+        coordinator.onStart = { startedMeeting = $0 }
+        coordinator.excludedMeetingIdsProvider = { ["m2"] }
+        source.meetingsToReturn = [
+            inProgressMeeting(id: "m1", title: "A"),
+            Meeting(
+                id: "m2",
+                title: "B",
+                start: currentDate.addingTimeInterval(-30),
+                end: currentDate.addingTimeInterval(900)
+            )
+        ]
+
+        coordinator.setEnabled(true)
+
+        XCTAssertEqual(presentedCount, 0)
+        XCTAssertEqual(startedMeeting?.id, "m1")
+    }
+
+    /// 제외한 회의 때문에 잠자기를 막을 이유가 없다.
+    func testExcludedMeetingDoesNotHoldTheMacAwake() {
+        let coordinator = makeCoordinator()
+        coordinator.isRecordingProvider = { false }
+        coordinator.excludedMeetingIdsProvider = { ["m1"] }
+        source.meetingsToReturn = [inProgressMeeting(id: "m1")]
+
+        coordinator.setEnabled(true)
+
+        XCTAssertFalse(sleepPreventer.isActive)
+    }
 }

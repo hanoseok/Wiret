@@ -30,6 +30,8 @@ final class AutoRecordingCoordinator {
     var isStartInFlightProvider: (() -> Bool)?
     /// 음성 메모 앱이 직접 녹음 중인지. 그동안에는 자동 녹음도 자동 중단도 하지 않는다.
     var isExternalRecordingProvider: (() -> Bool)?
+    /// 오늘 일정 화면에서 사용자가 자동 녹음에서 빼 둔 회의.
+    var excludedMeetingIdsProvider: (() -> Set<String>)?
     private(set) var autoMeetingId: String?
 
     init(
@@ -134,10 +136,7 @@ final class AutoRecordingCoordinator {
 
     func tick() {
         let referenceDate = now()
-        let meetings = source.meetings(
-            from: referenceDate.addingTimeInterval(-12 * 3600),
-            to: referenceDate.addingTimeInterval(24 * 3600)
-        )
+        let meetings = recordableMeetings(around: referenceDate)
         let current = MeetingSchedule.currentAll(in: meetings, at: referenceDate)
         let next = MeetingSchedule.next(in: meetings, after: referenceDate)
 
@@ -240,12 +239,25 @@ final class AutoRecordingCoordinator {
         pendingChoiceIds = nil
     }
 
-    private func refreshStatusAndPower() {
-        let referenceDate = now()
+    /// 자동 녹음 대상이 되는 회의만.
+    ///
+    /// 사용자가 뺀 회의를 여기서 걸러 내면 시작과 중단이 한꺼번에 해결된다. 빼 둔 회의는
+    /// 후보에 오르지 않아 시작되지 않고, 녹음 중이던 회의를 빼면 `current`에서 사라지므로
+    /// 정책이 곧바로 중단으로 판단한다.
+    private func recordableMeetings(around referenceDate: Date) -> [Meeting] {
         let meetings = source.meetings(
             from: referenceDate.addingTimeInterval(-12 * 3600),
             to: referenceDate.addingTimeInterval(24 * 3600)
         )
+        guard let excluded = excludedMeetingIdsProvider?(), !excluded.isEmpty else {
+            return meetings
+        }
+        return meetings.filter { !excluded.contains($0.id) }
+    }
+
+    private func refreshStatusAndPower() {
+        let referenceDate = now()
+        let meetings = recordableMeetings(around: referenceDate)
         let current = MeetingSchedule.currentAll(in: meetings, at: referenceDate)
         let next = MeetingSchedule.next(in: meetings, after: referenceDate)
         updateStatusText(current: current, next: next)
