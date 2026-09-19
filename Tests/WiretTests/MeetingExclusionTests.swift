@@ -2,8 +2,18 @@ import XCTest
 @testable import Wiret
 
 final class TodayScheduleTests: XCTestCase {
-    private let noon = Date(timeIntervalSince1970: 1_700_000_000)
-    private var calendar = Calendar(identifier: .gregorian)
+    /// 시간대를 고정하지 않으면 실행 지역에 따라 같은 시각이 다른 날이 된다.
+    /// (UTC 러너에서 한국 기준 정오가 전날로 넘어가 테스트가 깨진 적이 있다.)
+    private let calendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar
+    }()
+
+    /// 하루 한가운데라, 몇 시간을 더하고 빼도 같은 날 안에 머문다.
+    private lazy var noon = calendar.date(
+        from: DateComponents(year: 2026, month: 9, day: 16, hour: 12)
+    )!
 
     private func meeting(id: String, offsetHours: Double, durationMinutes: Double = 60) -> Meeting {
         let start = noon.addingTimeInterval(offsetHours * 3600)

@@ -397,15 +397,16 @@ final class AppDelegateTests: XCTestCase {
 
     // MARK: - 오늘의 일정
 
-    private func todayMeeting(id: String, hoursFromNow: Double) -> Meeting {
-        let start = Date().addingTimeInterval(hoursFromNow * 3600)
+    /// 자정 근처에 돌려도 흔들리지 않도록 "지금부터"가 아니라 오늘 0시를 기준으로 잡는다.
+    private func todayMeeting(id: String, hoursIntoDay: Double) -> Meeting {
+        let start = Calendar.current.startOfDay(for: Date()).addingTimeInterval(hoursIntoDay * 3600)
         return Meeting(id: id, title: id, start: start, end: start.addingTimeInterval(1800))
     }
 
     func testTodayScheduleWindowListsTodaysMeetings() {
         calendarSource.meetingsToReturn = [
-            todayMeeting(id: "m1", hoursFromNow: 1),
-            todayMeeting(id: "m2", hoursFromNow: 2)
+            todayMeeting(id: "m1", hoursIntoDay: 9),
+            todayMeeting(id: "m2", hoursIntoDay: 11)
         ]
 
         delegate.showTodaySchedule()
@@ -415,7 +416,7 @@ final class AppDelegateTests: XCTestCase {
 
     /// 기본은 모두 포함이므로 처음 열면 전부 체크돼 있어야 한다.
     func testTodayScheduleStartsWithEverythingIncluded() {
-        calendarSource.meetingsToReturn = [todayMeeting(id: "m1", hoursFromNow: 1)]
+        calendarSource.meetingsToReturn = [todayMeeting(id: "m1", hoursIntoDay: 9)]
 
         delegate.showTodaySchedule()
 
@@ -424,7 +425,7 @@ final class AppDelegateTests: XCTestCase {
 
     /// 체크를 끄면 그 회의가 자동 녹음 대상에서 빠지고, 창을 다시 열어도 유지돼야 한다.
     func testUncheckingExcludesMeetingAndPersists() {
-        calendarSource.meetingsToReturn = [todayMeeting(id: "m1", hoursFromNow: 1)]
+        calendarSource.meetingsToReturn = [todayMeeting(id: "m1", hoursIntoDay: 9)]
         delegate.showTodaySchedule()
 
         delegate.todayScheduleWindow?.toggleCheckbox(at: 0)
@@ -434,7 +435,7 @@ final class AppDelegateTests: XCTestCase {
     }
 
     func testRecheckingIncludesMeetingAgain() {
-        calendarSource.meetingsToReturn = [todayMeeting(id: "m1", hoursFromNow: 1)]
+        calendarSource.meetingsToReturn = [todayMeeting(id: "m1", hoursIntoDay: 9)]
         delegate.showTodaySchedule()
         delegate.todayScheduleWindow?.toggleCheckbox(at: 0)
 
@@ -448,8 +449,8 @@ final class AppDelegateTests: XCTestCase {
     /// 내일 일정까지 섞여 보이면 오늘 화면이 아니다.
     func testTodayScheduleExcludesOtherDays() {
         calendarSource.meetingsToReturn = [
-            todayMeeting(id: "today", hoursFromNow: 1),
-            todayMeeting(id: "tomorrow", hoursFromNow: 26)
+            todayMeeting(id: "today", hoursIntoDay: 9),
+            todayMeeting(id: "tomorrow", hoursIntoDay: 33)
         ]
 
         delegate.showTodaySchedule()
