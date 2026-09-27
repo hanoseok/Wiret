@@ -86,9 +86,10 @@ final class GitHubUpdateChecker: UpdateChecking {
     }
 
     func fetchReleases(completion: @escaping (Result<[ReleaseInfo], UpdateError>) -> Void) {
-        session.dataTask(with: makeReleasesRequest()) { [weak self] data, response, error in
-            guard let self else { return }
-
+        // self 를 약하게 잡으면, 호출한 쪽이 체커를 붙들고 있지 않을 때 요청이 끝나기 전에 해제되어
+        // 완료 콜백이 아예 불리지 않는다. 기다리는 쪽은 영영 응답을 못 받는다.
+        // 요청이 끝날 때까지만 붙드는 것이므로 강하게 잡는다.
+        session.dataTask(with: makeReleasesRequest()) { data, response, error in
             if error == nil,
                let http = response as? HTTPURLResponse,
                (200..<300).contains(http.statusCode),

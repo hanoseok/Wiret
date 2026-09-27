@@ -171,6 +171,13 @@ Wiret은 실행할 때와 6시간마다 새 버전을 확인하고, 있으면 �
 - 자동 확인이 실패하면(네트워크 문제 등) 조용히 넘어갑니다. 직접 눌렀을 때만 오류를 알립니다.
 - 내려받은 앱의 `WiretVersion`이 기대한 버전과 다르면 교체하지 않습니다. 엉뚱한 파일로 앱을 덮어쓰면 복구가 어렵습니다.
 
+## 다운로드 (정식 버전)
+
+- 최신 정식 버전: <https://github.com/hanoseok/Wiret/releases/latest>
+- 직접 받기: `https://github.com/hanoseok/Wiret/releases/download/v1.0.0/Wiret-1.0.0.zip`
+
+정식 버전을 설치하면 이후 정식 버전 안에서만 자동으로 업데이트됩니다.
+
 ## 다운로드 (스냅샷 빌드)
 
 `develop` 브랜치에 푸시되면 GitHub Actions가 자동으로 `x.y.z-SNAPSHOT` 버전을 빌드해 릴리스로 올립니다. (`0.0.1-SNAPSHOT`부터 시작하고, 푸시될 때마다 패치 번호가 1씩 올라갑니다.)
