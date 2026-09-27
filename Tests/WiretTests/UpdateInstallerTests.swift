@@ -159,3 +159,22 @@ final class UpdateInstallerTests: XCTestCase {
         }
     }
 }
+
+final class GitHubUpdateCheckerRequestTests: XCTestCase {
+    /// GitHub API는 User-Agent 없는 요청을 403으로 거절한다. 실제로 겪은 문제라 테스트로 묶어 둔다.
+    func testReleasesRequestCarriesUserAgent() {
+        let request = GitHubUpdateChecker().makeReleasesRequest()
+
+        let userAgent = request.value(forHTTPHeaderField: "User-Agent")
+        XCTAssertNotNil(userAgent)
+        XCTAssertFalse(userAgent?.isEmpty ?? true)
+    }
+
+    func testReleasesRequestAsksForTheReleasesEndpoint() {
+        let request = GitHubUpdateChecker(repository: "hanoseok/Wiret").makeReleasesRequest()
+
+        let url = request.url?.absoluteString ?? ""
+        XCTAssertTrue(url.hasPrefix("https://api.github.com/repos/hanoseok/Wiret/releases"), url)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/vnd.github+json")
+    }
+}

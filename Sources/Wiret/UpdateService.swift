@@ -50,23 +50,63 @@ protocol UpdateChecking: AnyObject {
 
 /// GitHub Releases API로 새 버전을 찾고 내려받는다.
 final class GitHubUpdateChecker: UpdateChecking {
+    /// GitHub API가 요구하는 식별 문자열.
+    static let userAgent = "Wiret-Updater"
+
+    private let repository: String
     private let releasesURL: URL
+    private let feedURL: URL
     private let session: URLSession
 
     init(
         repository: String = "hanoseok/Wiret",
         session: URLSession = .shared
     ) {
+        self.repository = repository
         self.releasesURL = URL(string: "https://api.github.com/repos/\(repository)/releases?per_page=30")!
+        self.feedURL = URL(string: "https://github.com/\(repository)/releases.atom")!
         self.session = session
     }
 
-    func fetchReleases(completion: @escaping (Result<[ReleaseInfo], UpdateError>) -> Void) {
+    func makeFeedRequest() -> URLRequest {
+        var request = URLRequest(url: feedURL)
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 20
+        return request
+    }
+
+    /// GitHub API는 User-Agent 없는 요청을 403으로 거절한다. 요청 구성을 따로 떼어 테스트한다.
+    func makeReleasesRequest() -> URLRequest {
         var request = URLRequest(url: releasesURL)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 20
+        return request
+    }
 
-        session.dataTask(with: request) { data, response, error in
+    func fetchReleases(completion: @escaping (Result<[ReleaseInfo], UpdateError>) -> Void) {
+        session.dataTask(with: makeReleasesRequest()) { [weak self] data, response, error in
+            guard let self else { return }
+
+            if error == nil,
+               let http = response as? HTTPURLResponse,
+               (200..<300).contains(http.statusCode),
+               let data {
+                let releases = AppUpdate.parseReleases(from: data)
+                if !releases.isEmpty {
+                    return completion(.success(releases))
+                }
+            }
+
+            // 익명 API는 IP당 시간 60회라 회사망에서는 남의 호출로 먼저 소진되곤 한다.
+            // 그때는 제한이 없는 Atom 피드로 한 번 더 시도한다.
+            self.fetchReleasesFromFeed(completion: completion)
+        }.resume()
+    }
+
+    private func fetchReleasesFromFeed(completion: @escaping (Result<[ReleaseInfo], UpdateError>) -> Void) {
+        session.dataTask(with: makeFeedRequest()) { [repository] data, response, error in
             if let error {
                 return completion(.failure(.network(error.localizedDescription)))
             }
@@ -76,7 +116,7 @@ final class GitHubUpdateChecker: UpdateChecking {
             guard let data else {
                 return completion(.failure(.network("빈 응답")))
             }
-            completion(.success(AppUpdate.parseReleases(from: data)))
+            completion(.success(AppUpdate.parseReleasesFeed(from: data, repository: repository)))
         }.resume()
     }
 

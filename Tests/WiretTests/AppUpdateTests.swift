@@ -171,3 +171,62 @@ final class AppUpdateReleaseParsingTests: XCTestCase {
         XCTAssertTrue(AppUpdate.parseReleases(from: json("{}")).isEmpty)
     }
 }
+
+final class AppUpdateFeedParsingTests: XCTestCase {
+    /// 실제 releases.atom 과 같은 모양.
+    private let feed = Data("""
+    <?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <id>tag:github.com,2008:https://github.com/hanoseok/Wiret/releases</id>
+      <link type="text/html" rel="alternate" href="https://github.com/hanoseok/Wiret/releases"/>
+      <entry>
+        <id>tag:github.com,2008:Repository/1/v0.0.8-SNAPSHOT</id>
+        <link rel="alternate" type="text/html" href="https://github.com/hanoseok/Wiret/releases/tag/v0.0.8-SNAPSHOT"/>
+        <title>Wiret 0.0.8-SNAPSHOT</title>
+      </entry>
+      <entry>
+        <id>tag:github.com,2008:Repository/1/snapshot-latest</id>
+        <link rel="alternate" type="text/html" href="https://github.com/hanoseok/Wiret/releases/tag/snapshot-latest"/>
+        <title>최신 스냅샷 (0.0.8-SNAPSHOT)</title>
+      </entry>
+      <entry>
+        <id>tag:github.com,2008:Repository/1/v1.0.0</id>
+        <link rel="alternate" type="text/html" href="https://github.com/hanoseok/Wiret/releases/tag/v1.0.0"/>
+        <title>Wiret 1.0.0</title>
+      </entry>
+    </feed>
+    """.utf8)
+
+    func testParsesVersionsFromFeed() {
+        let releases = AppUpdate.parseReleasesFeed(from: feed, repository: "hanoseok/Wiret")
+
+        XCTAssertEqual(releases.map(\.version.description), ["0.0.8-SNAPSHOT", "1.0.0"])
+    }
+
+    /// 피드에는 자산 목록이 없어 CI 이름 규칙으로 주소를 만든다.
+    /// 규칙이 바뀌면 여기서 먼저 깨져야 한다.
+    func testDerivesDownloadURLFromNamingConvention() {
+        let releases = AppUpdate.parseReleasesFeed(from: feed, repository: "hanoseok/Wiret")
+
+        XCTAssertEqual(
+            releases.first?.downloadURL.absoluteString,
+            "https://github.com/hanoseok/Wiret/releases/download/v0.0.8-SNAPSHOT/Wiret-0.0.8-SNAPSHOT.zip"
+        )
+        XCTAssertEqual(
+            releases.last?.downloadURL.absoluteString,
+            "https://github.com/hanoseok/Wiret/releases/download/v1.0.0/Wiret-1.0.0.zip"
+        )
+    }
+
+    /// snapshot-latest 는 버전별 릴리스와 같은 빌드를 가리키는 별칭이라 세면 중복이 된다.
+    func testSkipsNonVersionTags() {
+        let releases = AppUpdate.parseReleasesFeed(from: feed, repository: "hanoseok/Wiret")
+
+        XCTAssertFalse(releases.contains { $0.downloadURL.absoluteString.contains("snapshot-latest") })
+    }
+
+    func testEmptyFeedYieldsNothing() {
+        XCTAssertTrue(AppUpdate.parseReleasesFeed(from: Data(), repository: "a/b").isEmpty)
+        XCTAssertTrue(AppUpdate.parseReleasesFeed(from: Data("<feed/>".utf8), repository: "a/b").isEmpty)
+    }
+}

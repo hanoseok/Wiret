@@ -70,6 +70,44 @@ enum AppUpdate {
             .max { $0.version < $1.version }
     }
 
+    /// 릴리스 페이지의 Atom 피드에서 릴리스 목록을 뽑는다.
+    ///
+    /// 익명 GitHub API는 IP당 시간 60회로 묶여 있어, 회사망처럼 여러 사람이 같은 공인 IP를 쓰면
+    /// 남의 호출 때문에 403이 난다. 피드(`github.com/.../releases.atom`)는 그 제한을 받지 않아
+    /// API가 막혔을 때 쓸 수 있다.
+    ///
+    /// 피드에는 자산 목록이 없으므로 내려받을 주소를 CI의 이름 규칙에서 만든다. 잘못 짚어도
+    /// 설치 직전 `WiretVersion` 확인에서 걸러지므로 엉뚱한 앱으로 덮어쓰지는 않는다.
+    static func parseReleasesFeed(from data: Data, repository: String) -> [ReleaseInfo] {
+        let text = String(decoding: data, as: UTF8.self)
+        let marker = "/releases/tag/"
+
+        var tags: [String] = []
+        var cursor = text.startIndex
+        while let range = text.range(of: marker, range: cursor..<text.endIndex) {
+            cursor = range.upperBound
+            // href="..." 안이므로 따옴표 전까지가 태그다.
+            guard let end = text[cursor...].firstIndex(where: { $0 == "\"" || $0 == "<" }) else { break }
+            let tag = String(text[cursor..<end])
+            if !tag.isEmpty, !tags.contains(tag) {
+                tags.append(tag)
+            }
+        }
+
+        return tags.compactMap { tag -> ReleaseInfo? in
+            guard let version = AppVersion.parse(tag) else { return nil }
+            let asset = "Wiret-\(version).zip"
+            guard let download = URL(
+                string: "https://github.com/\(repository)/releases/download/\(tag)/\(asset)"
+            ) else { return nil }
+            return ReleaseInfo(
+                version: version,
+                downloadURL: download,
+                pageURL: URL(string: "https://github.com/\(repository)/releases/tag/\(tag)")
+            )
+        }
+    }
+
     /// GitHub Releases API 응답에서 릴리스 목록을 뽑는다.
     ///
     /// 태그에서 버전을 읽고, 자산 중 `.zip` 하나를 내려받을 대상으로 삼는다.
