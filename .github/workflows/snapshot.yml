@@ -50,7 +50,7 @@ jobs:
       - name: .app 빌드 (universal)
         env:
           UNIVERSAL: "1"
-          MARKETING_VERSION: ${{ steps.version.outputs.version }}
+          WIRET_VERSION: ${{ steps.version.outputs.full }}
           BUILD_NUMBER: ${{ github.run_number }}
         run: ./build_app.sh
 

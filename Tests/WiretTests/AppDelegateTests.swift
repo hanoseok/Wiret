@@ -88,7 +88,7 @@ final class AppDelegateTests: XCTestCase {
             XCTFail("menu missing")
             return
         }
-        XCTAssertEqual(menu.items.count, 11)
+        XCTAssertEqual(menu.items.count, 12)
         XCTAssertEqual(menu.items[0].title, "녹음 시작")
         XCTAssertEqual(menu.items[1].title, "녹음 중단")
         XCTAssertTrue(menu.items[2].isSeparatorItem)
@@ -97,10 +97,11 @@ final class AppDelegateTests: XCTestCase {
         XCTAssertEqual(menu.items[5].title, "캘린더")
         XCTAssertNotNil(menu.items[5].submenu)
         XCTAssertEqual(menu.items[6].title, "오늘의 일정")
-        XCTAssertEqual(menu.items[7].title, "음성 메모로 보내기")
-        XCTAssertEqual(menu.items[8].title, "음성 메모 단축어 삭제")
-        XCTAssertTrue(menu.items[9].isSeparatorItem)
-        XCTAssertEqual(menu.items[10].title, "종료")
+        XCTAssertEqual(menu.items[7].title, "업데이트 확인")
+        XCTAssertEqual(menu.items[8].title, "음성 메모로 보내기")
+        XCTAssertEqual(menu.items[9].title, "음성 메모 단축어 삭제")
+        XCTAssertTrue(menu.items[10].isSeparatorItem)
+        XCTAssertEqual(menu.items[11].title, "종료")
         XCTAssertFalse(menu.autoenablesItems)
     }
 

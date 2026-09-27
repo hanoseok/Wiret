@@ -4,7 +4,12 @@ cd "$(dirname "$0")"
 
 # 옵션(환경 변수)
 #   UNIVERSAL=1            : arm64 + x86_64 유니버설 바이너리로 빌드
-#   MARKETING_VERSION=x.y.z: CFBundleShortVersionString 값 덮어쓰기
+#   WIRET_VERSION=x.y.z[-SNAPSHOT]
+#                          : 배포 버전. WiretVersion 키에 그대로 기록하고 숫자 부분은
+#                            CFBundleShortVersionString 으로 쓴다. 자동 업데이트는 이 키로
+#                            자기 채널(스냅샷/정식)을 판단하므로, 없으면 로컬 빌드로 보고
+#                            업데이트를 제안하지 않는다.
+#   MARKETING_VERSION=x.y.z: CFBundleShortVersionString 만 덮어쓰기
 #   BUILD_NUMBER=n         : CFBundleVersion 값 덮어쓰기
 BUILD_ARGS=(-c release)
 if [[ "${UNIVERSAL:-0}" == "1" ]]; then
@@ -30,6 +35,11 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 rm -rf "$(dirname "$ICONSET")"
 
 PLIST="$APP/Contents/Info.plist"
+if [[ -n "${WIRET_VERSION:-}" ]]; then
+  /usr/libexec/PlistBuddy -c "Add :WiretVersion string $WIRET_VERSION" "$PLIST"
+  # CFBundleShortVersionString 은 숫자만 받으므로 -SNAPSHOT 을 떼고 넣는다.
+  : "${MARKETING_VERSION:=${WIRET_VERSION%-SNAPSHOT}}"
+fi
 if [[ -n "${MARKETING_VERSION:-}" ]]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MARKETING_VERSION" "$PLIST"
 fi

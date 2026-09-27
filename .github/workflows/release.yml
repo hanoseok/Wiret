@@ -1,0 +1,139 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      # 정식 버전만. 스냅샷 태그(v0.0.8-SNAPSHOT)는 snapshot 워크플로가 맡는다.
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "빌드할 정식 버전 (예: 1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-build
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # 태그 필터가 스냅샷을 걸러 내지만, 혹시 새면 정식 릴리스가 스냅샷으로 만들어진다.
+    # 그때는 실패가 아니라 조용히 건너뛰게 한다.
+    if: ${{ !contains(github.ref_name, '-SNAPSHOT') }}
+    runs-on: macos-15
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: 버전 결정
+        id: version
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "정식 버전 형식이 아닙니다: $version" >&2
+            exit 1
+          fi
+
+          {
+            echo "version=${version}"
+            echo "tag=v${version}"
+          } >> "$GITHUB_OUTPUT"
+          echo "정식 릴리스 버전: ${version}"
+
+      - name: 테스트
+        run: swift test
+
+      - name: .app 빌드 (universal)
+        env:
+          UNIVERSAL: "1"
+          WIRET_VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./build_app.sh
+
+      - name: 채널 확인
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          recorded="$(/usr/libexec/PlistBuddy -c "Print :WiretVersion" build/Wiret.app/Contents/Info.plist)"
+          # 여기에 -SNAPSHOT 이 섞여 들어가면 정식 사용자가 스냅샷으로 갱신된다.
+          if [ "$recorded" != "$VERSION" ]; then
+            echo "기록된 버전이 다릅니다: $recorded (기대 $VERSION)" >&2
+            exit 1
+          fi
+          echo "WiretVersion=$recorded"
+
+      - name: 압축
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent build/Wiret.app "dist/Wiret-${VERSION}.zip"
+          ls -lh dist
+
+      - name: 릴리스 노트 작성
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cat > dist/notes.md <<EOF
+          Wiret 정식 릴리스입니다.
+
+          - 버전: \`${VERSION}\`
+          - 커밋: ${GITHUB_SHA}
+          - 아키텍처: Apple Silicon + Intel (universal)
+
+          ## 설치 방법
+
+          1. 아래 \`Wiret-${VERSION}.zip\` 을 내려받아 압축을 풉니다.
+          2. \`Wiret.app\` 을 \`/Applications\` 로 옮깁니다.
+          3. 개발자 서명이 없는 앱이라 첫 실행 전에 격리 속성을 제거해야 합니다.
+
+          \`\`\`bash
+          xattr -dr com.apple.quarantine /Applications/Wiret.app
+          open /Applications/Wiret.app
+          \`\`\`
+
+          설치 후에는 Wiret이 정식 버전 안에서만 자동으로 업데이트를 확인합니다.
+          EOF
+
+      - name: 릴리스 생성
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "dist/Wiret-${VERSION}.zip" --clobber
+          else
+            gh release create "$TAG" "dist/Wiret-${VERSION}.zip" \
+              --target "$GITHUB_SHA" \
+              --title "Wiret ${VERSION}" \
+              --notes-file dist/notes.md \
+              --latest
+          fi
+
+      - name: 요약
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Wiret ${VERSION} (정식)"
+            echo ""
+            echo "- 다운로드: https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Wiret-${VERSION}.zip"
+          } >> "$GITHUB_STEP_SUMMARY"

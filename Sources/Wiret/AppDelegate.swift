@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private(set) var autoStatusItem: NSMenuItem!
     private(set) var calendarItem: NSMenuItem!
     private(set) var todayScheduleItem: NSMenuItem!
+    private(set) var updateItem: NSMenuItem!
     private(set) var voiceMemosItem: NSMenuItem!
     private(set) var shortcutItem: NSMenuItem!
 
@@ -36,6 +37,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var choiceWindow: MeetingChoiceWindowController?
     private(set) var todayScheduleWindow: TodayScheduleWindowController?
     private lazy var exclusionStore = MeetingExclusionStore(defaults: defaults)
+    private let updateCoordinator: UpdateCoordinator
+    private var updateTimer: Timer?
+
+    /// 자동 업데이트 확인 주기. 하루 종일 켜 두는 메뉴바 앱이라 너무 잦으면 API 호출만 낭비된다.
+    private static let updateCheckInterval: TimeInterval = 6 * 3600
     private var wakeObserver: NSObjectProtocol?
     var suppressAlertsForTesting = false
 
@@ -44,8 +50,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         voiceMemosImporter: VoiceMemosImporter = VoiceMemosImporter(),
         shortcutInstaller: VoiceMemosShortcutInstaller = VoiceMemosShortcutInstaller(),
         calendarSource: MeetingSource = EventKitMeetingSource(),
-        externalRecordingDetector: ExternalRecordingDetecting = CoreAudioRecordingDetector()
+        externalRecordingDetector: ExternalRecordingDetecting = CoreAudioRecordingDetector(),
+        updateCoordinator: UpdateCoordinator = UpdateCoordinator(
+            currentVersion: BundleVersion.current(),
+            checker: GitHubUpdateChecker(),
+            bundleURL: Bundle.main.bundleURL
+        )
     ) {
+        self.updateCoordinator = updateCoordinator
         self.defaults = defaults
         self.calendarSource = calendarSource
         self.externalRecordingDetector = externalRecordingDetector
@@ -76,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var currentRecordingURL: URL?
 
     deinit {
+        updateTimer?.invalidate()
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
@@ -119,6 +132,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         todayScheduleItem.target = self
         menu.addItem(todayScheduleItem)
+
+        updateItem = NSMenuItem(
+            title: "업데이트 확인",
+            action: #selector(checkForUpdatesManually),
+            keyEquivalent: ""
+        )
+        updateItem.target = self
+        menu.addItem(updateItem)
 
         voiceMemosItem = NSMenuItem(
             title: "음성 메모로 보내기",
@@ -193,6 +214,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             self?.warnIfStatusItemHidden()
         }
+
+        startUpdateChecks()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -518,6 +541,120 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let error {
             showErrorAlert(error)
         }
+    }
+
+    // MARK: - 자동 업데이트
+
+    private func startUpdateChecks() {
+        updateItem?.isEnabled = updateCoordinator.canCheck
+
+        updateCoordinator.isBusyProvider = { [weak self] in
+            // 녹음 중에는 끼어들지 않는다. 앱을 교체하면 녹음이 끊긴다.
+            self?.state == .recording
+        }
+        updateCoordinator.onUpdateAvailable = { [weak self] release in
+            DispatchQueue.main.async { self?.presentUpdatePrompt(release) }
+        }
+        updateCoordinator.onUpToDate = { [weak self] version in
+            DispatchQueue.main.async { self?.showUpToDateAlert(version) }
+        }
+        updateCoordinator.onInstalled = { [weak self] release in
+            DispatchQueue.main.async { self?.finishUpdate(release) }
+        }
+        updateCoordinator.onError = { [weak self] error in
+            DispatchQueue.main.async { self?.showUpdateErrorAlert(error) }
+        }
+
+        guard updateCoordinator.canCheck else { return }
+
+        updateCoordinator.check(userInitiated: false)
+        updateTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.updateCheckInterval,
+            repeats: true
+        ) { [weak self] _ in
+            self?.updateCoordinator.check(userInitiated: false)
+        }
+    }
+
+    @objc private func checkForUpdatesManually() {
+        updateCoordinator.check(userInitiated: true)
+    }
+
+    private func presentUpdatePrompt(_ release: ReleaseInfo) {
+        if suppressAlertsForTesting { return }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "새 버전 \(release.version)이 있습니다"
+        alert.informativeText = "지금 업데이트하면 Wiret을 내려받아 교체한 뒤 다시 실행합니다."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "지금 업데이트")
+        alert.addButton(withTitle: "나중에")
+        if release.pageURL != nil {
+            alert.addButton(withTitle: "변경 내용 보기")
+        }
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            updateCoordinator.install(release)
+        case .alertThirdButtonReturn:
+            if let page = release.pageURL {
+                NSWorkspace.shared.open(page)
+            }
+            updateCoordinator.postpone(release)
+        default:
+            updateCoordinator.postpone(release)
+        }
+    }
+
+    /// 교체가 끝났으니 새 버전으로 다시 실행한다.
+    private func finishUpdate(_ release: ReleaseInfo) {
+        if suppressAlertsForTesting { return }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "\(release.version)으로 업데이트했습니다"
+        alert.informativeText = "확인을 누르면 Wiret을 다시 실행합니다."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "확인")
+        alert.runModal()
+
+        relaunch()
+    }
+
+    private func relaunch() {
+        // 이 프로세스가 사라진 뒤에 열려야 하므로, 잠깐 기다렸다 여는 별도 프로세스에 맡긴다.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        // 경로를 인자로 넘겨 따옴표 문제를 피한다.
+        process.arguments = ["-c", "sleep 1; open \"$0\"", Bundle.main.bundleURL.path]
+        try? process.run()
+
+        NSApp.terminate(nil)
+    }
+
+    private func showUpToDateAlert(_ version: AppVersion) {
+        if suppressAlertsForTesting { return }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "최신 버전입니다"
+        alert.informativeText = "지금 \(version)을 쓰고 있습니다."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "확인")
+        alert.runModal()
+    }
+
+    private func showUpdateErrorAlert(_ error: UpdateError) {
+        if suppressAlertsForTesting { return }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "업데이트하지 못했습니다"
+        alert.informativeText = error.errorDescription ?? ""
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "확인")
+        alert.runModal()
     }
 
     @objc func showTodaySchedule() {
