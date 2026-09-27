@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let voiceMemosImporter: VoiceMemosImporter
     private let shortcutInstaller: VoiceMemosShortcutInstaller
     private(set) lazy var coordinator = AutoRecordingCoordinator(source: calendarSource, defaults: defaults)
+    private(set) lazy var meetingNotifier = MeetingNotificationCoordinator(source: calendarSource, defaults: defaults)
 
     var state: RecordingState = .idle {
         didSet { updateMenu() }
@@ -17,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private(set) var startItem: NSMenuItem!
     private(set) var stopItem: NSMenuItem!
     private(set) var autoItem: NSMenuItem!
+    private(set) var notificationItem: NSMenuItem!
     private(set) var autoStatusItem: NSMenuItem!
     private(set) var calendarItem: NSMenuItem!
     private(set) var todayScheduleItem: NSMenuItem!
@@ -35,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     private var startRequestedAt = Date.distantPast
     private var choiceWindow: MeetingChoiceWindowController?
+    private var notificationWindow: MeetingNotificationWindowController?
     private(set) var todayScheduleWindow: TodayScheduleWindowController?
     private lazy var exclusionStore = MeetingExclusionStore(defaults: defaults)
     private let updateCoordinator: UpdateCoordinator
@@ -114,6 +117,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         autoItem.target = self
         menu.addItem(autoItem)
 
+        notificationItem = NSMenuItem(title: "알림", action: #selector(toggleNotifications), keyEquivalent: "")
+        notificationItem.target = self
+        menu.addItem(notificationItem)
+
         autoStatusItem = NSMenuItem(title: "자동: 꺼짐", action: nil, keyEquivalent: "")
         autoStatusItem.isEnabled = false
         menu.addItem(autoStatusItem)
@@ -173,10 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         coordinator.isRecordingProvider = { [weak self] in self?.state == .recording }
-        coordinator.isStartInFlightProvider = { [weak self] in
-            guard let self, self.isStarting else { return false }
-            return Date().timeIntervalSince(self.startRequestedAt) < Self.startInFlightTimeout
-        }
+        coordinator.isStartInFlightProvider = { [weak self] in self?.isStartInFlight ?? false }
         coordinator.isExternalRecordingProvider = { [weak self] in
             self?.externalRecordingDetector.isVoiceMemosRecording ?? false
         }
@@ -195,9 +199,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         coordinator.onChoose = { [weak self] meetings in self?.presentMeetingChoice(meetings) }
         coordinator.onChoiceObsolete = { [weak self] in self?.dismissMeetingChoice() }
         autoItem.state = coordinator.isEnabled ? .on : .off
+        configureMeetingNotifier()
+        // 두 코디네이터가 같은 캘린더를 본다. onChange는 하나뿐이라 여기서 둘 다에 전달한다.
+        calendarSource.onChange = { [weak self] in
+            self?.coordinator.tick()
+            self?.meetingNotifier.tick()
+        }
         calendarSource.selectedCalendarIDs = selectedCalendarIDs
         rebuildCalendarMenu()
         coordinator.start()
+        meetingNotifier.start()
 
         // Waking from sleep: re-check immediately so a meeting that ended while asleep stops right
         // away and a meeting that is now in progress starts.
@@ -207,6 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             queue: .main
         ) { [weak self] _ in
             self?.coordinator.tick()
+            self?.meetingNotifier.tick()
         }
 
         updateMenu()
@@ -220,6 +232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         coordinator.releaseForTermination()
+        meetingNotifier.releaseForTermination()
         let url = recorder.stop() ?? currentRecordingURL
         currentRecordingURL = nil
         if let url {
@@ -281,16 +294,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func startAutoRecording(for meeting: Meeting) {
-        if !beginRecording(title: meeting.title) {
+        let accepted = beginRecording(title: meeting.title, onFailure: { [weak self] in
+            self?.coordinator.noteAutoStartFailed()
+        })
+        if !accepted {
             // Busy or already recording: don't leave the coordinator waiting on a recording that never began.
             coordinator.noteAutoStartFailed()
         }
     }
 
-    /// - Returns: whether the start request was accepted (a permission or recorder failure is reported
-    ///   asynchronously through `coordinator.noteAutoStartFailed()`).
+    /// 회의 시작 알림에서 "녹음 시작"을 눌렀을 때.
+    private func startNotifiedRecording(for meeting: Meeting) {
+        let accepted = beginRecording(title: meeting.title, onFailure: { [weak self] in
+            self?.meetingNotifier.noteStartFailed()
+        })
+        if !accepted {
+            meetingNotifier.noteStartFailed()
+        }
+    }
+
+    /// 시작 요청이 처리되는 중인지. 끝나지 않는 요청(권한 창을 열어 둔 채 방치 등)이 자동 녹음과 알림을
+    /// 영영 막지 않도록 일정 시간이 지나면 풀어 준다.
+    private var isStartInFlight: Bool {
+        guard isStarting else { return false }
+        return Date().timeIntervalSince(startRequestedAt) < Self.startInFlightTimeout
+    }
+
+    /// - Parameter onFailure: 요청은 받아들였지만 권한이나 녹음기 문제로 시작하지 못했을 때 호출된다.
+    ///   시작을 요청한 쪽(자동 녹음 또는 알림)이 기다리던 상태를 풀 수 있도록 넘겨받는다.
+    /// - Returns: whether the start request was accepted.
     @discardableResult
-    private func beginRecording(title: String?) -> Bool {
+    private func beginRecording(title: String?, onFailure: (() -> Void)? = nil) -> Bool {
         guard state == .idle, !isStarting else {
             return false
         }
@@ -304,18 +338,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 do {
                     self.currentRecordingURL = try self.recorder.start(title: title)
                     self.state = .recording
+                    self.meetingNotifier.noteRecordingStarted()
                 } catch {
                     self.updateMenu()
-                    if title != nil {
-                        self.coordinator.noteAutoStartFailed()
-                    }
+                    onFailure?()
                     self.showErrorAlert(error)
                 }
             } else {
                 self.updateMenu()
-                if title != nil {
-                    self.coordinator.noteAutoStartFailed()
-                }
+                onFailure?()
                 self.showPermissionDeniedAlert()
             }
         }
@@ -331,6 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let url = recorder.stop() ?? currentRecordingURL
         currentRecordingURL = nil
         state = .idle
+        meetingNotifier.noteRecordingStopped()
         if let url {
             importToVoiceMemos(url)
         }
@@ -408,6 +440,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildCalendarMenu()
         // 바뀐 선택으로 지금 회의 상태를 다시 판단한다.
         coordinator.tick()
+        meetingNotifier.tick()
     }
 
     /// 단축어가 이미 있으면 삭제를, 없으면 설치를 제안한다. 둘 중 하나만 보인다.
@@ -462,6 +495,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         coordinator.setEnabled(willEnable)
         autoItem.state = coordinator.isEnabled ? .on : .off
         refreshShortcutItem()
+        // 자동이 켜지면 떠 있던 시작 알림은 필요 없고, 꺼지면 알림이 회의 시작을 맡는다.
+        meetingNotifier.tick()
+    }
+
+    // MARK: - 회의 알림
+
+    /// 테스트에서 메뉴 동작을 그대로 호출하기 위한 통로.
+    @objc func toggleNotificationsForTesting() {
+        toggleNotifications()
+    }
+
+    @objc private func toggleNotifications() {
+        meetingNotifier.setEnabled(!meetingNotifier.isEnabled)
+        notificationItem.state = meetingNotifier.isEnabled ? .on : .off
+    }
+
+    private func configureMeetingNotifier() {
+        meetingNotifier.isRecordingProvider = { [weak self] in self?.state == .recording }
+        meetingNotifier.isStartInFlightProvider = { [weak self] in self?.isStartInFlight ?? false }
+        meetingNotifier.isAutoEnabledProvider = { [weak self] in self?.coordinator.isEnabled ?? false }
+        meetingNotifier.isAutoRecordingProvider = { [weak self] in self?.coordinator.autoMeetingId != nil }
+        meetingNotifier.isExternalRecordingProvider = { [weak self] in
+            self?.externalRecordingDetector.isVoiceMemosRecording ?? false
+        }
+        meetingNotifier.excludedMeetingIdsProvider = { [weak self] in
+            self?.exclusionStore.excludedIDs ?? []
+        }
+        meetingNotifier.onStart = { [weak self] meeting in self?.startNotifiedRecording(for: meeting) }
+        meetingNotifier.onStop = { [weak self] in
+            // 메뉴에서 중단한 것과 같다. 자동 녹음이 같은 회의를 다시 시작하지 않게 한다.
+            self?.coordinator.noteManualStop()
+            self?.endRecording()
+        }
+        meetingNotifier.onPrompt = { [weak self] prompt in self?.presentMeetingNotification(prompt) }
+        meetingNotifier.onPromptObsolete = { [weak self] in self?.dismissMeetingNotification() }
+        meetingNotifier.onAccessDenied = { [weak self] in
+            self?.showCalendarDeniedAlert()
+            self?.notificationItem.state = .off
+        }
+        notificationItem.state = meetingNotifier.isEnabled ? .on : .off
+    }
+
+    private func presentMeetingNotification(_ prompt: MeetingNotificationPrompt) {
+        dismissMeetingNotification()
+        if suppressAlertsForTesting { return }
+
+        // 응답은 창이 닫힌 뒤 비동기로 넘어온다. 그사이 새 알림 창으로 바뀌었다면 지난 창의 답은 버린다.
+        weak var weakController: MeetingNotificationWindowController?
+        let controller = MeetingNotificationWindowController(prompt: prompt) { [weak self] response in
+            guard let self, let responder = weakController, responder === self.notificationWindow else { return }
+            self.notificationWindow = nil
+            self.meetingNotifier.respond(response, to: responder.prompt)
+        }
+        weakController = controller
+        notificationWindow = controller
+        controller.show()
+    }
+
+    private func dismissMeetingNotification() {
+        notificationWindow?.dismiss()
+        notificationWindow = nil
     }
 
     @objc private func toggleVoiceMemosImport() {
@@ -533,6 +627,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func handleUnexpectedStop(_ error: Error?) {
         coordinator.noteManualStop()
         state = .idle
+        meetingNotifier.noteRecordingStopped()
         let url = currentRecordingURL
         currentRecordingURL = nil
         if let url {
@@ -680,6 +775,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.exclusionStore.setExcluded(excluded, meeting: meeting)
                 // 지금 녹음 중인 회의를 뺐다면 곧바로 반영되어야 한다.
                 self.coordinator.tick()
+                self.meetingNotifier.tick()
             }
         )
         todayScheduleWindow = controller

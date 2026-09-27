@@ -88,20 +88,21 @@ final class AppDelegateTests: XCTestCase {
             XCTFail("menu missing")
             return
         }
-        XCTAssertEqual(menu.items.count, 12)
+        XCTAssertEqual(menu.items.count, 13)
         XCTAssertEqual(menu.items[0].title, "녹음 시작")
         XCTAssertEqual(menu.items[1].title, "녹음 중단")
         XCTAssertTrue(menu.items[2].isSeparatorItem)
         XCTAssertEqual(menu.items[3].title, "자동")
-        XCTAssertFalse(menu.items[4].isEnabled)
-        XCTAssertEqual(menu.items[5].title, "캘린더")
-        XCTAssertNotNil(menu.items[5].submenu)
-        XCTAssertEqual(menu.items[6].title, "오늘의 일정")
-        XCTAssertEqual(menu.items[7].title, "업데이트 확인")
-        XCTAssertEqual(menu.items[8].title, "음성 메모로 보내기")
-        XCTAssertEqual(menu.items[9].title, "음성 메모 단축어 삭제")
-        XCTAssertTrue(menu.items[10].isSeparatorItem)
-        XCTAssertEqual(menu.items[11].title, "종료")
+        XCTAssertEqual(menu.items[4].title, "알림")
+        XCTAssertFalse(menu.items[5].isEnabled)
+        XCTAssertEqual(menu.items[6].title, "캘린더")
+        XCTAssertNotNil(menu.items[6].submenu)
+        XCTAssertEqual(menu.items[7].title, "오늘의 일정")
+        XCTAssertEqual(menu.items[8].title, "업데이트 확인")
+        XCTAssertEqual(menu.items[9].title, "음성 메모로 보내기")
+        XCTAssertEqual(menu.items[10].title, "음성 메모 단축어 삭제")
+        XCTAssertTrue(menu.items[11].isSeparatorItem)
+        XCTAssertEqual(menu.items[12].title, "종료")
         XCTAssertFalse(menu.autoenablesItems)
     }
 
@@ -296,6 +297,82 @@ final class AppDelegateTests: XCTestCase {
 
         XCTAssertEqual(shortcutInstaller.signCount, afterEnable)
         XCTAssertEqual(delegate.autoItem.state, .off)
+    }
+
+    // MARK: - 회의 알림
+
+    func testNotificationItemIsOffByDefault() {
+        XCTAssertEqual(delegate.notificationItem.title, "알림")
+        XCTAssertEqual(delegate.notificationItem.state, .off)
+        XCTAssertFalse(delegate.meetingNotifier.isEnabled)
+    }
+
+    func testTogglingNotificationsTurnsThemOnAndOff() {
+        delegate.perform(#selector(AppDelegate.toggleNotificationsForTesting))
+
+        XCTAssertTrue(delegate.meetingNotifier.isEnabled)
+        XCTAssertEqual(delegate.notificationItem.state, .on)
+
+        delegate.perform(#selector(AppDelegate.toggleNotificationsForTesting))
+
+        XCTAssertFalse(delegate.meetingNotifier.isEnabled)
+        XCTAssertEqual(delegate.notificationItem.state, .off)
+    }
+
+    /// 알림을 켜 둔 상태는 앱을 다시 켜도 유지돼야 한다.
+    func testNotificationsSurviveRelaunch() {
+        delegate.perform(#selector(AppDelegate.toggleNotificationsForTesting))
+
+        let relaunched = AppDelegate(
+            defaults: UserDefaults(suiteName: suiteName)!,
+            voiceMemosImporter: VoiceMemosImporter(runner: shortcutRunner),
+            shortcutInstaller: VoiceMemosShortcutInstaller(installer: shortcutInstaller),
+            calendarSource: calendarSource
+        )
+
+        XCTAssertTrue(relaunched.meetingNotifier.isEnabled)
+    }
+
+    /// 알림을 켜는 것은 자동 녹음과 별개다.
+    func testEnablingNotificationsLeavesAutoOff() {
+        delegate.perform(#selector(AppDelegate.toggleNotificationsForTesting))
+
+        XCTAssertFalse(delegate.coordinator.isEnabled)
+        XCTAssertEqual(delegate.autoItem.state, .off)
+    }
+
+    /// 두 코디네이터 모두 캘린더 변경을 받아야 한다. 나중에 만든 쪽이 덮어쓰면 한쪽이 멈춘다.
+    func testCalendarChangeReachesNotifier() {
+        let start = Date().addingTimeInterval(-60)
+        let meeting = Meeting(id: "m1", title: "회의", start: start, end: start.addingTimeInterval(1800))
+        delegate.perform(#selector(AppDelegate.toggleNotificationsForTesting))
+        XCTAssertNil(delegate.meetingNotifier.pendingPrompt)
+
+        calendarSource.meetingsToReturn = [meeting]
+        calendarSource.onChange?()
+
+        XCTAssertEqual(delegate.meetingNotifier.pendingPrompt, .start(meeting))
+    }
+
+    /// 녹음이 예기치 않게 끝나면 떠 있던 종료 알림은 물을 게 없어진다.
+    func testUnexpectedStopClearsEndPrompt() {
+        let start = Date().addingTimeInterval(-600)
+        calendarSource.meetingsToReturn = [
+            Meeting(id: "m1", title: "회의", start: start, end: start.addingTimeInterval(1800))
+        ]
+        delegate.state = .recording
+        delegate.perform(#selector(AppDelegate.toggleNotificationsForTesting))
+        XCTAssertEqual(delegate.meetingNotifier.trackedMeetingId, "m1")
+
+        // 캘린더에서 회의를 앞당겨 끝낸 것처럼 종료 시각을 지금 이전으로 바꾼다.
+        let ended = Meeting(id: "m1", title: "회의", start: start, end: start.addingTimeInterval(300))
+        calendarSource.meetingsToReturn = [ended]
+        calendarSource.onChange?()
+        XCTAssertEqual(delegate.meetingNotifier.pendingPrompt, .end(ended))
+
+        delegate.handleUnexpectedStop(nil)
+
+        XCTAssertNil(delegate.meetingNotifier.pendingPrompt)
     }
 
     // MARK: - 캘린더 선택
