@@ -5,9 +5,9 @@ private final class TopAlignedClipView: NSClipView {
     override var isFlipped: Bool { true }
 }
 
-/// 오늘 일정을 보여주고, 자동 녹음에서 뺄 회의를 고르게 하는 창.
+/// 오늘 일정을 보여주고, 자동 녹음·회의 알림에서 뺄 회의를 고르게 하는 창.
 ///
-/// 기본은 전부 포함이다. 체크를 끄면 그 회의만 자동 녹음에서 빠진다.
+/// 기본은 전부 포함이다. 체크를 끄면 그 회의만 자동 녹음과 알림에서 빠진다.
 final class TodayScheduleWindowController: NSWindowController, NSWindowDelegate {
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -76,7 +76,7 @@ final class TodayScheduleWindowController: NSWindowController, NSWindowDelegate 
         let heading = NSTextField(labelWithString: Self.dayFormatter.string(from: date))
         heading.font = .boldSystemFont(ofSize: 15)
 
-        let explanation = NSTextField(wrappingLabelWithString: "체크된 회의가 자동 녹음 대상입니다. 녹음하고 싶지 않은 회의는 체크를 끄세요.")
+        let explanation = NSTextField(wrappingLabelWithString: "체크된 회의가 자동 녹음·알림 대상입니다. 녹음하고 싶지 않은 회의는 체크를 끄세요.")
         explanation.textColor = .secondaryLabelColor
         explanation.translatesAutoresizingMaskIntoConstraints = false
         explanation.widthAnchor.constraint(equalToConstant: 420).isActive = true
