@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private(set) var calendarItem: NSMenuItem!
     private(set) var todayScheduleItem: NSMenuItem!
     private(set) var updateItem: NSMenuItem!
+    private(set) var versionItem: NSMenuItem!
     private(set) var voiceMemosItem: NSMenuItem!
     private(set) var shortcutItem: NSMenuItem!
 
@@ -147,6 +148,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         updateItem.target = self
         menu.addItem(updateItem)
+
+        versionItem = NSMenuItem(title: Self.versionTitle(for: nil), action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
 
         voiceMemosItem = NSMenuItem(
             title: "음성 메모로 보내기",
@@ -640,8 +645,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - 자동 업데이트
 
+    /// 메뉴에 보여줄 버전 문구. 로컬 빌드는 채널을 몰라 업데이트를 확인하지 않는다는 것을 그대로 드러낸다.
+    static func versionTitle(for version: AppVersion?) -> String {
+        guard let version else {
+            return "현재 버전: 로컬 빌드 (자동 업데이트 꺼짐)"
+        }
+        return "현재 버전: \(version)"
+    }
+
     private func startUpdateChecks() {
+        let version = updateCoordinator.currentVersion
         updateItem?.isEnabled = updateCoordinator.canCheck
+        versionItem?.title = Self.versionTitle(for: version)
+        // 로컬 빌드는 WiretVersion이 없어 채널을 알 수 없으므로 왜 업데이트 확인이 꺼져 있는지 알려 준다.
+        let localBuildTip = version == nil
+            ? "WiretVersion이 없는 로컬 빌드라 채널을 몰라 업데이트를 확인하지 않습니다. 릴리스나 스냅샷 zip을 /Applications에 설치하면 자동 업데이트를 받을 수 있습니다."
+            : nil
+        updateItem?.toolTip = localBuildTip
+        versionItem?.toolTip = localBuildTip
 
         updateCoordinator.isBusyProvider = { [weak self] in
             // 녹음 중에는 끼어들지 않는다. 앱을 교체하면 녹음이 끊긴다.

@@ -4,7 +4,8 @@ import Foundation
 ///
 /// 채널 규칙은 `AppUpdate.newestUpdate`가 지킨다. 여기서는 "언제 묻고, 언제 묻지 않는가"를 정한다.
 final class UpdateCoordinator {
-    private let currentVersion: AppVersion?
+    /// 로컬 빌드 여부를 메뉴에 보여줄 수 있도록 외부에서도 읽는다.
+    let currentVersion: AppVersion?
     private let checker: UpdateChecking
     private let installer: UpdateInstaller
     private let bundleURL: URL
