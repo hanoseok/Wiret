@@ -32,6 +32,11 @@ final class AutoRecordingCoordinator {
     var isExternalRecordingProvider: (() -> Bool)?
     /// 오늘 일정 화면에서 사용자가 자동 녹음에서 빼 둔 회의.
     var excludedMeetingIdsProvider: (() -> Set<String>)?
+    /// 회의 알림이 켜져 있는지. 켜져 있으면 회의가 끝났을 때 녹음을 멈추지 않고 알림에 넘긴다.
+    /// 사용자가 회의가 길어졌는지 보고 직접 끝낼 수 있게 하려는 것이다.
+    var shouldHandOffEndProvider: (() -> Bool)?
+    /// 회의가 끝난 자동 녹음을 알림에 넘길 때. 이때부터 녹음은 수동 녹음으로 취급한다.
+    var onHandOffEnd: ((Meeting) -> Void)?
     private(set) var autoMeetingId: String?
 
     init(
@@ -173,6 +178,18 @@ final class AutoRecordingCoordinator {
         case .choose(let candidates):
             presentChoice(candidates)
         case .stop:
+            if let ended = normallyEndedAutoMeeting(in: meetings, at: referenceDate),
+               shouldHandOffEndProvider?() == true {
+                // 멈추지 않고 알림에 넘긴다. 같은 회의를 다시 시작하지 않도록 끝난 것으로 두고,
+                // autoMeetingId를 비워 이 녹음을 수동 녹음으로 만든다. 정책은 수동 녹음을 건드리지 않는다.
+                finishedMeetingIds.insert(ended.id)
+                autoMeetingId = nil
+                onHandOffEnd?(ended)
+                // 녹음이 이어지므로 연달아 잡힌 다음 회의는 지금 시작하지 않는다. 사용자가 알림에서
+                // 녹음을 끝내면 다음 확인에서 그 회의가 시작된다.
+                break
+            }
+
             if let autoMeetingId {
                 finishedMeetingIds.insert(autoMeetingId)
             }
@@ -201,6 +218,19 @@ final class AutoRecordingCoordinator {
 
         updateStatusText(current: current, next: next)
         updatePowerAssertion(current: current, next: next, at: referenceDate)
+    }
+
+    /// 자동 녹음 중이던 회의가 제시간에 끝나서 멈추는 것이면 그 회의를 돌려준다.
+    ///
+    /// 자동을 껐거나, 회의를 빼거나 지웠거나, 녹음이 실제로 돌고 있지 않으면 nil이다. 이런 중단은
+    /// 사용자가 이미 멈추라고 한 것이거나 넘길 녹음이 없는 것이라 알림으로 묻지 않고 바로 멈춘다.
+    private func normallyEndedAutoMeeting(in meetings: [Meeting], at referenceDate: Date) -> Meeting? {
+        guard isEnabled,
+              isRecordingProvider?() == true,
+              let autoMeetingId,
+              let meeting = meetings.first(where: { $0.id == autoMeetingId }),
+              referenceDate >= meeting.end else { return nil }
+        return meeting
     }
 
     /// While a start request is being processed, drop starts and prompts (a second one would race the

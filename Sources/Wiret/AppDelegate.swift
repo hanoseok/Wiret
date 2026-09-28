@@ -212,6 +212,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         exclusionStore.prune()
         coordinator.onStart = { [weak self] meeting in self?.startAutoRecording(for: meeting) }
         coordinator.onStop = { [weak self] in self?.endRecording() }
+        // 알림이 켜져 있으면 회의가 끝나도 바로 멈추지 않고 종료 알림으로 묻는다. 자동은 start()에서야
+        // 확인을 시작하고, 알림은 그 전에 configureMeetingNotifier()로 준비된다.
+        coordinator.shouldHandOffEndProvider = { [weak self] in self?.meetingNotifier.isEnabled ?? false }
+        coordinator.onHandOffEnd = { [weak self] meeting in self?.meetingNotifier.adoptEndedRecording(of: meeting) }
         coordinator.onStatusText = { [weak self] text in self?.autoStatusItem.title = text }
         coordinator.onAccessDenied = { [weak self] in
             self?.showCalendarDeniedAlert()
