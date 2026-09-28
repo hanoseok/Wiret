@@ -32,6 +32,17 @@ private final class StubShortcutInstaller: ShortcutInstalling {
     }
 }
 
+/// 버전 표시 테스트에서만 쓴다. 네트워크를 타지 않도록 빈 목록만 돌려준다.
+private final class FakeUpdateCheckerForVersionTest: UpdateChecking {
+    func fetchReleases(completion: @escaping (Result<[ReleaseInfo], UpdateError>) -> Void) {
+        completion(.success([]))
+    }
+
+    func download(_ release: ReleaseInfo, completion: @escaping (Result<URL, UpdateError>) -> Void) {
+        completion(.failure(.network("테스트에서는 내려받지 않습니다")))
+    }
+}
+
 private final class StubMeetingSource: MeetingSource {
     var onChange: (() -> Void)?
     var availableCalendars: [CalendarInfo] = []
@@ -88,7 +99,7 @@ final class AppDelegateTests: XCTestCase {
             XCTFail("menu missing")
             return
         }
-        XCTAssertEqual(menu.items.count, 13)
+        XCTAssertEqual(menu.items.count, 14)
         XCTAssertEqual(menu.items[0].title, "녹음 시작")
         XCTAssertEqual(menu.items[1].title, "녹음 중단")
         XCTAssertTrue(menu.items[2].isSeparatorItem)
@@ -99,11 +110,59 @@ final class AppDelegateTests: XCTestCase {
         XCTAssertNotNil(menu.items[6].submenu)
         XCTAssertEqual(menu.items[7].title, "오늘의 일정")
         XCTAssertEqual(menu.items[8].title, "업데이트 확인")
-        XCTAssertEqual(menu.items[9].title, "음성 메모로 보내기")
-        XCTAssertEqual(menu.items[10].title, "음성 메모 단축어 삭제")
-        XCTAssertTrue(menu.items[11].isSeparatorItem)
-        XCTAssertEqual(menu.items[12].title, "종료")
+        XCTAssertEqual(menu.items[9].title, delegate.versionItem.title)
+        XCTAssertFalse(menu.items[9].isEnabled)
+        XCTAssertEqual(menu.items[10].title, "음성 메모로 보내기")
+        XCTAssertEqual(menu.items[11].title, "음성 메모 단축어 삭제")
+        XCTAssertTrue(menu.items[12].isSeparatorItem)
+        XCTAssertEqual(menu.items[13].title, "종료")
         XCTAssertFalse(menu.autoenablesItems)
+    }
+
+    /// XCTest 번들에는 `WiretVersion`이 없으므로 기본 delegate는 로컬 빌드로 취급된다.
+    func testVersionItemShowsLocalBuildTitleByDefault() {
+        XCTAssertEqual(delegate.versionItem.title, "현재 버전: 로컬 빌드 (자동 업데이트 꺼짐)")
+        XCTAssertFalse(delegate.versionItem.isEnabled)
+        XCTAssertFalse(delegate.updateItem.isEnabled)
+    }
+
+    func testVersionTitleForSnapshotVersion() {
+        let version = AppVersion.parse("0.0.11-SNAPSHOT")
+        XCTAssertEqual(AppDelegate.versionTitle(for: version), "현재 버전: 0.0.11-SNAPSHOT")
+    }
+
+    func testVersionTitleForReleaseVersion() {
+        let version = AppVersion.parse("1.0.0")
+        XCTAssertEqual(AppDelegate.versionTitle(for: version), "현재 버전: 1.0.0")
+    }
+
+    func testVersionTitleForNilVersion() {
+        XCTAssertEqual(AppDelegate.versionTitle(for: nil), "현재 버전: 로컬 빌드 (자동 업데이트 꺼짐)")
+    }
+
+    /// 채널을 아는 빌드라면 버전 문구가 실제 버전을 보여준다.
+    func testVersionItemShowsCurrentVersionWhenKnown() {
+        let checker = FakeUpdateCheckerForVersionTest()
+        let coordinator = UpdateCoordinator(
+            currentVersion: AppVersion.parse("0.0.11-SNAPSHOT"),
+            checker: checker,
+            bundleURL: URL(fileURLWithPath: "/tmp/Wiret.app")
+        )
+        let versionedDelegate = AppDelegate(
+            defaults: UserDefaults(suiteName: suiteName)!,
+            voiceMemosImporter: VoiceMemosImporter(runner: shortcutRunner),
+            shortcutInstaller: VoiceMemosShortcutInstaller(installer: shortcutInstaller),
+            calendarSource: calendarSource,
+            updateCoordinator: coordinator
+        )
+        versionedDelegate.suppressAlertsForTesting = true
+        versionedDelegate.applicationDidFinishLaunching(
+            Notification(name: NSApplication.didFinishLaunchingNotification)
+        )
+        defer { NSStatusBar.system.removeStatusItem(versionedDelegate.statusItem) }
+
+        XCTAssertEqual(versionedDelegate.versionItem.title, "현재 버전: 0.0.11-SNAPSHOT")
+        XCTAssertTrue(versionedDelegate.updateItem.isEnabled)
     }
 
     func testAutoItemReflectsPersistedDisabledState() {
