@@ -23,6 +23,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private(set) var calendarItem: NSMenuItem!
     private(set) var todayScheduleItem: NSMenuItem!
     private(set) var updateItem: NSMenuItem!
+    /// 새 버전이 있을 때만 메뉴에 들어간다. 없을 때는 nil이다.
+    private(set) var updateAvailableItem: NSMenuItem?
     private(set) var versionItem: NSMenuItem!
     private(set) var voiceMemosItem: NSMenuItem!
     private(set) var shortcutItem: NSMenuItem!
@@ -43,6 +45,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private lazy var exclusionStore = MeetingExclusionStore(defaults: defaults)
     private let updateCoordinator: UpdateCoordinator
     private var updateTimer: Timer?
+    private var updateItemView: MenuActionItemView!
+    private var updateCheckStatus: UpdateCheckStatus = .idle {
+        didSet { refreshUpdateItem() }
+    }
+    /// 업데이트 버튼이 가리키는 버전.
+    private var availableRelease: ReleaseInfo?
+    private var isInstallingUpdate = false {
+        didSet { refreshUpdateAvailableItem() }
+    }
 
     /// 자동 업데이트 확인 주기. 하루 종일 켜 두는 메뉴바 앱이라 너무 잦으면 API 호출만 낭비된다.
     private static let updateCheckInterval: TimeInterval = 6 * 3600
@@ -142,11 +153,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(todayScheduleItem)
 
         updateItem = NSMenuItem(
-            title: "업데이트 확인",
+            title: UpdateCheckStatus.idle.title,
             action: #selector(checkForUpdatesManually),
             keyEquivalent: ""
         )
         updateItem.target = self
+        // 뷰 안의 클릭은 메뉴를 닫지 않는다. 확인 결과를 메뉴를 연 채로 그 자리에서 보여 주려고 뷰를 쓴다.
+        // 키보드로 고르면 뷰를 거치지 않고 위의 action이 불리며, 이때는 메뉴가 닫힌다.
+        updateItemView = MenuActionItemView(title: UpdateCheckStatus.idle.title)
+        updateItemView.onClick = { [weak self] in self?.checkForUpdatesManually() }
+        updateItem.view = updateItemView
         menu.addItem(updateItem)
 
         versionItem = NSMenuItem(title: Self.versionTitle(for: nil), action: nil, keyEquivalent: "")
@@ -380,6 +396,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         refreshShortcutItem()
+        // 며칠 전의 "최신 버전입니다"가 남아 있으면 지금도 최신인 것처럼 읽힌다. 확인 중일 때만 그대로 둔다.
+        if updateCheckStatus != .checking {
+            updateCheckStatus = .idle
+        }
     }
 
     // MARK: - 캘린더 선택
@@ -653,32 +673,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return "현재 버전: \(version)"
     }
 
+    /// 로컬 빌드는 WiretVersion이 없어 채널을 알 수 없으므로 왜 업데이트 확인이 꺼져 있는지 알려 준다.
+    private static let localBuildTip =
+        "WiretVersion이 없는 로컬 빌드라 채널을 몰라 업데이트를 확인하지 않습니다. 릴리스나 스냅샷 zip을 /Applications에 설치하면 자동 업데이트를 받을 수 있습니다."
+
     private func startUpdateChecks() {
         let version = updateCoordinator.currentVersion
-        updateItem?.isEnabled = updateCoordinator.canCheck
         versionItem?.title = Self.versionTitle(for: version)
-        // 로컬 빌드는 WiretVersion이 없어 채널을 알 수 없으므로 왜 업데이트 확인이 꺼져 있는지 알려 준다.
-        let localBuildTip = version == nil
-            ? "WiretVersion이 없는 로컬 빌드라 채널을 몰라 업데이트를 확인하지 않습니다. 릴리스나 스냅샷 zip을 /Applications에 설치하면 자동 업데이트를 받을 수 있습니다."
-            : nil
-        updateItem?.toolTip = localBuildTip
-        versionItem?.toolTip = localBuildTip
+        versionItem?.toolTip = version == nil ? Self.localBuildTip : nil
+        refreshUpdateItem()
 
         updateCoordinator.isBusyProvider = { [weak self] in
             // 녹음 중에는 끼어들지 않는다. 앱을 교체하면 녹음이 끊긴다.
             self?.state == .recording
         }
-        updateCoordinator.onUpdateAvailable = { [weak self] release in
-            DispatchQueue.main.async { self?.presentUpdatePrompt(release) }
+        // 콜백은 백그라운드 큐에서 온다. 메인 큐는 메뉴가 열려 있는 동안에도 돌므로 열린 메뉴가 그대로 바뀐다.
+        updateCoordinator.onUpdateAvailable = { [weak self] release, userInitiated in
+            DispatchQueue.main.async { self?.handleUpdateAvailable(release, userInitiated: userInitiated) }
         }
-        updateCoordinator.onUpToDate = { [weak self] version in
-            DispatchQueue.main.async { self?.showUpToDateAlert(version) }
+        updateCoordinator.onUpToDate = { [weak self] _ in
+            DispatchQueue.main.async { self?.updateCheckStatus = .upToDate }
+        }
+        updateCoordinator.onCheckFailed = { [weak self] error in
+            DispatchQueue.main.async { self?.updateCheckStatus = .failed(error) }
         }
         updateCoordinator.onInstalled = { [weak self] release in
             DispatchQueue.main.async { self?.finishUpdate(release) }
         }
         updateCoordinator.onError = { [weak self] error in
-            DispatchQueue.main.async { self?.showUpdateErrorAlert(error) }
+            DispatchQueue.main.async {
+                // 다시 누를 수 있게 버튼을 되돌린다. 실패 이유는 메뉴 한 줄에 담기 어려워 창으로 알린다.
+                self?.isInstallingUpdate = false
+                self?.showUpdateErrorAlert(error)
+            }
         }
 
         guard updateCoordinator.canCheck else { return }
@@ -693,7 +720,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func checkForUpdatesManually() {
+        guard updateCoordinator.canCheck, updateCheckStatus != .checking else { return }
+        updateCheckStatus = .checking
         updateCoordinator.check(userInitiated: true)
+    }
+
+    private func handleUpdateAvailable(_ release: ReleaseInfo, userInitiated: Bool) {
+        // 내려받는 중에 버튼을 바꾸면 진행 중인 설치와 다른 버전을 가리키게 된다. 묻는 창도 띄우지 않는다.
+        guard !isInstallingUpdate else { return }
+        if userInitiated {
+            // 결과는 바로 아래에 생긴 버튼이 말해 주므로 확인 항목은 원래 문구로 돌아간다.
+            updateCheckStatus = .idle
+        }
+        showUpdateButton(for: release)
+        if !userInitiated {
+            // 메뉴를 열지 않는 사용자도 있으니 자동 확인은 지금까지처럼 창으로도 묻는다.
+            presentUpdatePrompt(release)
+        }
+    }
+
+    /// 새 버전이 있을 때만 "업데이트 확인" 바로 아래에 버튼을 둔다. 더 새 버전이 나오면 같은 버튼을 고쳐 쓴다.
+    private func showUpdateButton(for release: ReleaseInfo) {
+        availableRelease = release
+        if updateAvailableItem == nil, let menu = updateItem.menu {
+            let item = NSMenuItem(title: "", action: #selector(installAvailableUpdate), keyEquivalent: "")
+            item.target = self
+            menu.insertItem(item, at: menu.index(of: updateItem) + 1)
+            updateAvailableItem = item
+        }
+        refreshUpdateAvailableItem()
+    }
+
+    /// 버튼은 일반 메뉴 항목이라 누르면 메뉴가 닫힌다. 내려받기는 기다려야 하는 일이라 그편이 자연스럽다.
+    @objc private func installAvailableUpdate() {
+        guard let availableRelease else { return }
+        installUpdate(availableRelease)
+    }
+
+    /// 버튼과 자동 확인 창의 "지금 업데이트"가 같은 길을 타야 버튼 상태가 어긋나지 않는다.
+    private func installUpdate(_ release: ReleaseInfo) {
+        guard !isInstallingUpdate else { return }
+        isInstallingUpdate = true
+        updateCoordinator.install(release)
+    }
+
+    private func refreshUpdateItem() {
+        guard let updateItem, let updateItemView else { return }
+        let canCheck = updateCoordinator.canCheck
+        let status = updateCheckStatus
+        let isEnabled = canCheck && status != .checking
+        let toolTip: String?
+        if !canCheck {
+            toolTip = Self.localBuildTip
+        } else if case .failed(let error) = status {
+            toolTip = error.errorDescription
+        } else {
+            toolTip = nil
+        }
+
+        // 테스트와 손쉬운 사용은 메뉴 항목의 제목을 읽으므로 뷰와 항목을 함께 맞춘다.
+        updateItemView.title = status.title
+        updateItemView.isEnabled = isEnabled
+        updateItemView.toolTip = toolTip
+        updateItem.title = status.title
+        updateItem.isEnabled = isEnabled
+        updateItem.toolTip = toolTip
+    }
+
+    private func refreshUpdateAvailableItem() {
+        guard let updateAvailableItem, let availableRelease else { return }
+        updateAvailableItem.title = isInstallingUpdate
+            ? "업데이트 내려받는 중…"
+            : "\(availableRelease.version)으로 업데이트"
+        updateAvailableItem.isEnabled = !isInstallingUpdate
     }
 
     private func presentUpdatePrompt(_ release: ReleaseInfo) {
@@ -712,7 +811,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
-            updateCoordinator.install(release)
+            installUpdate(release)
         case .alertThirdButtonReturn:
             if let page = release.pageURL {
                 NSWorkspace.shared.open(page)
@@ -747,18 +846,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         try? process.run()
 
         NSApp.terminate(nil)
-    }
-
-    private func showUpToDateAlert(_ version: AppVersion) {
-        if suppressAlertsForTesting { return }
-        NSApp.activate(ignoringOtherApps: true)
-
-        let alert = NSAlert()
-        alert.messageText = "최신 버전입니다"
-        alert.informativeText = "지금 \(version)을 쓰고 있습니다."
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "확인")
-        alert.runModal()
     }
 
     private func showUpdateErrorAlert(_ error: UpdateError) {
@@ -924,5 +1011,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.alertStyle = .warning
         alert.addButton(withTitle: "확인")
         alert.runModal()
+    }
+}
+
+/// "업데이트 확인" 항목이 보여 주는 수동 확인 결과. 결과를 창 대신 항목 문구로 알린다.
+enum UpdateCheckStatus: Equatable {
+    case idle
+    case checking
+    case upToDate
+    case failed(UpdateError)
+
+    var title: String {
+        switch self {
+        case .idle: return "업데이트 확인"
+        case .checking: return "업데이트 확인 중…"
+        case .upToDate: return "최신 버전입니다"
+        // 누르면 다시 확인하므로 그 사실을 문구에 담는다.
+        case .failed: return "업데이트 확인 실패 · 다시 시도"
+        }
     }
 }
