@@ -220,7 +220,7 @@ xattr -dr com.apple.quarantine /Applications/Wiret.app
 open /Applications/Wiret.app
 ```
 
-압축을 풀면 바로 실행할 수 있는 `Wiret.app`이 나옵니다. 배포용 개발자 서명이 없는 ad-hoc 서명 앱이라, 내려받은 뒤 첫 실행 전에 위처럼 격리 속성(`com.apple.quarantine`)을 제거해야 합니다. 스냅샷 빌드는 Apple Silicon과 Intel을 모두 지원하는 universal 바이너리입니다.
+압축을 풀면 바로 실행할 수 있는 `Wiret.app`이 나옵니다. Apple 개발자 인증서로 서명·공증한 앱이 아니라, 내려받은 뒤 첫 실행 전에 위처럼 격리 속성(`com.apple.quarantine`)을 제거해야 합니다. 스냅샷 빌드는 Apple Silicon과 Intel을 모두 지원하는 universal 바이너리입니다.
 
 ## 아이콘
 
@@ -235,7 +235,7 @@ open /Applications/Wiret.app
 ./build_app.sh
 ```
 
-`Package.swift` 기준으로 release 빌드를 수행하고, `build/Wiret.app` 번들을 생성한 뒤 ad-hoc 코드사이닝을 적용합니다.
+`Package.swift` 기준으로 release 빌드를 수행하고, `build/Wiret.app` 번들을 생성한 뒤 코드사이닝을 적용합니다. 서명 인증서를 지정하지 않으면 ad-hoc으로 서명합니다. 배포 빌드(CI)는 항상 인증서로 서명합니다. 자세한 내용은 [코드 서명](#코드-서명)을 참고하세요.
 
 다음 환경 변수로 동작을 바꿀 수 있습니다. (CI 스냅샷 빌드가 사용하는 값입니다.)
 
@@ -244,6 +244,8 @@ open /Applications/Wiret.app
 | `UNIVERSAL=1` | arm64 + x86_64 universal 바이너리로 빌드 |
 | `MARKETING_VERSION=x.y.z` | `CFBundleShortVersionString` 덮어쓰기 |
 | `BUILD_NUMBER=n` | `CFBundleVersion` 덮어쓰기 |
+| `SIGN_IDENTITY=...` | 서명 인증서 이름 또는 SHA-1 (없으면 ad-hoc) |
+| `SIGN_KEYCHAIN=path` | `SIGN_IDENTITY`를 찾을 키체인 |
 
 ```bash
 UNIVERSAL=1 MARKETING_VERSION=0.0.1 BUILD_NUMBER=1 ./build_app.sh
@@ -267,7 +269,7 @@ cp -R build/Wiret.app /Applications/
 
 처음 "녹음 시작"을 누르면 마이크 접근 권한을 요청합니다. 만약 권한이 거부된 상태라면 안내창의 "시스템 설정 열기" 버튼을 눌러 **시스템 설정 > 개인정보 보호 및 보안 > 마이크**에서 Wiret의 접근을 허용해주세요.
 
-Wiret은 ad-hoc으로 서명되므로, 다시 빌드할 때마다 macOS가 마이크 권한을 다시 요청할 수 있습니다. 또한 `/Applications/Wiret.app`과 `build/Wiret.app`은 마이크 권한 기준으로 서로 다른 앱으로 취급됩니다.
+배포 빌드는 같은 인증서로 서명되므로 업데이트해도 마이크·캘린더 권한이 유지됩니다. 반면 직접 빌드한 `build/Wiret.app`은 ad-hoc으로 서명되어 다시 빌드할 때마다 권한을 다시 요청하고, 배포 빌드와도 서로 다른 앱으로 취급됩니다.
 
 ## 아이콘이 보이지 않을 때
 
@@ -278,6 +280,21 @@ macOS는 메뉴 막대가 가득 차면 새 아이콘을 노치 뒤로 숨깁니
 ```bash
 swift test
 ```
+
+## 코드 서명
+
+macOS는 캘린더·마이크 권한을 앱의 **서명 요구사항**에 묶어 기억합니다. ad-hoc 서명은 이 요구사항이 빌드마다 바뀌는 해시(`cdhash`)라서, 업데이트할 때마다 권한이 초기화됩니다. 캘린더 권한이 없으면 자동 녹음도 스스로 꺼집니다.
+
+그래서 CI는 모든 배포 빌드를 같은 자체 서명 인증서(`Wiret Code Signing (hanoseok)`)로 서명합니다. 그러면 서명 요구사항이 빌드와 상관없이 같아집니다.
+
+```
+designated => identifier "com.hanoseok.wiret" and certificate root = H"4dbaa1aa81c3e94b4bd0484c3e3739790bd5c028"
+```
+
+- 인증서는 저장소 시크릿 `WIRET_SIGNING_P12_BASE64`(base64로 인코딩한 .p12)와 `WIRET_SIGNING_P12_PASSWORD`로 CI에 전달됩니다. `Scripts/setup_signing_keychain.sh`가 이를 임시 키체인에 넣습니다.
+- 시크릿이 없으면 빌드는 ad-hoc으로 넘어가지 않고 **실패**합니다. 빌드 뒤 "서명 확인" 단계도 인증서 서명이 아니면 실패합니다. ad-hoc 빌드가 배포되면 사용자 권한이 초기화되기 때문입니다.
+- 인증서를 **바꾸거나 잃어버리면** 서명 요구사항이 달라져, 모든 사용자의 권한이 한 번 초기화됩니다. 원본 .p12는 저장소 밖에 보관합니다.
+- Apple 공증을 받은 인증서가 아니므로 Gatekeeper 확인을 피하지는 못합니다. 설치 방법은 [다운로드 (스냅샷 빌드)](#다운로드-스냅샷-빌드)의 안내를 따르세요.
 
 ## 정식 릴리스 (CI)
 

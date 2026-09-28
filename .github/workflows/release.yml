@@ -54,12 +54,31 @@ jobs:
       - name: 테스트
         run: swift test
 
+      - name: 서명 인증서 준비
+        # 같은 인증서로 서명해야 업데이트 뒤에도 캘린더·마이크 권한이 유지된다.
+        # 시크릿이 없으면 ad-hoc 으로 조용히 넘어가지 않고 실패한다.
+        env:
+          WIRET_SIGNING_P12_BASE64: ${{ secrets.WIRET_SIGNING_P12_BASE64 }}
+          WIRET_SIGNING_P12_PASSWORD: ${{ secrets.WIRET_SIGNING_P12_PASSWORD }}
+        run: ./Scripts/setup_signing_keychain.sh
+
       - name: .app 빌드 (universal)
         env:
           UNIVERSAL: "1"
           WIRET_VERSION: ${{ steps.version.outputs.version }}
           BUILD_NUMBER: ${{ github.run_number }}
         run: ./build_app.sh
+
+      - name: 서명 확인
+        run: |
+          set -euo pipefail
+          requirement="$(codesign -d -r- build/Wiret.app 2>&1 | grep designated)"
+          echo "$requirement"
+          # cdhash 로 식별되는 서명이면 업데이트할 때마다 권한이 초기화된다.
+          case "$requirement" in
+            *"certificate root"*) ;;
+            *) echo "인증서 서명이 아닙니다" >&2; exit 1 ;;
+          esac
 
       - name: 채널 확인
         env:
