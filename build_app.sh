@@ -11,6 +11,11 @@ cd "$(dirname "$0")"
 #                            업데이트를 제안하지 않는다.
 #   MARKETING_VERSION=x.y.z: CFBundleShortVersionString 만 덮어쓰기
 #   BUILD_NUMBER=n         : CFBundleVersion 값 덮어쓰기
+#   SIGN_IDENTITY=...      : 서명에 쓸 인증서(이름 또는 SHA-1). 없으면 ad-hoc(-) 서명.
+#                            ad-hoc 서명은 빌드마다 바뀌는 해시로 앱을 식별하므로, 업데이트할
+#                            때마다 캘린더·마이크 권한이 초기화된다. 같은 인증서로 서명하면
+#                            식별 기준이 인증서가 되어 권한이 유지된다.
+#   SIGN_KEYCHAIN=path     : SIGN_IDENTITY 를 찾을 키체인 (CI 의 임시 키체인)
 BUILD_ARGS=(-c release)
 if [[ "${UNIVERSAL:-0}" == "1" ]]; then
   BUILD_ARGS+=(--arch arm64 --arch x86_64)
@@ -48,6 +53,10 @@ if [[ -n "${BUILD_NUMBER:-}" ]]; then
 fi
 
 # Info.plist 수정 후에 서명해야 서명이 깨지지 않는다
-codesign --force --sign - "$APP"
+SIGN_ARGS=(--force --sign "${SIGN_IDENTITY:--}")
+if [[ -n "${SIGN_KEYCHAIN:-}" ]]; then
+  SIGN_ARGS+=(--keychain "$SIGN_KEYCHAIN")
+fi
+codesign "${SIGN_ARGS[@]}" "$APP"
 
 echo "Built: $APP"
