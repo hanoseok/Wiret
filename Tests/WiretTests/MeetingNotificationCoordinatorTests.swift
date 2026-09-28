@@ -502,7 +502,8 @@ final class MeetingNotificationCoordinatorTests: XCTestCase {
         XCTAssertEqual(prompts, [.start(m1)])
     }
 
-    func testNoEndPromptForAutoRecording() {
+    /// 자동이 녹음을 맡고 있는 동안에는 스스로 종료 알림을 띄우지 않는다. 회의가 끝나 자동이 넘겨줄 때 띄운다.
+    func testNoEndPromptWhileAutoOwnsRecording() {
         isAutoEnabled = true
         let m1 = meeting("m1", from: -60, to: 600)
         source.meetingsToReturn = [m1]
@@ -756,5 +757,143 @@ final class MeetingNotificationCoordinatorTests: XCTestCase {
         notifier.noteStartFailed()
 
         XCTAssertNil(notifier.trackedMeetingId)
+    }
+
+    // MARK: - 자동 녹음이 넘겨준 녹음
+
+    /// 자동이 녹음을 맡고 있던 상태를 만든다. 회의 중에 자동이 녹음을 시작했다.
+    private func makeNotifierWithAutoRecording(_ meeting: Meeting) -> MeetingNotificationCoordinator {
+        isAutoEnabled = true
+        isRecording = true
+        isAutoRecording = true
+        source.meetingsToReturn = [meeting]
+        let notifier = makeNotifier()
+        notifier.setEnabled(true)
+        return notifier
+    }
+
+    /// 회의가 끝나 자동이 녹음을 넘겨준 순간과 같다.
+    private func handOff(_ notifier: MeetingNotificationCoordinator, _ meeting: Meeting) {
+        currentDate = meeting.end
+        isAutoRecording = false
+        notifier.adoptEndedRecording(of: meeting)
+    }
+
+    func testAdoptedRecordingPromptsEndImmediately() {
+        let m1 = meeting("m1", from: -60, to: 600)
+        let notifier = makeNotifierWithAutoRecording(m1)
+        XCTAssertTrue(prompts.isEmpty)
+
+        handOff(notifier, m1)
+
+        XCTAssertEqual(prompts, [.end(m1)])
+        XCTAssertEqual(notifier.pendingPrompt, .end(m1))
+        XCTAssertEqual(notifier.trackedMeetingId, "m1")
+    }
+
+    func testAdoptingIsIgnoredWhenNotificationsAreOff() {
+        let m1 = meeting("m1", from: -60, to: 600)
+        isRecording = true
+        source.meetingsToReturn = [m1]
+        let notifier = makeNotifier()
+
+        handOff(notifier, m1)
+        notifier.tick()
+
+        XCTAssertTrue(prompts.isEmpty)
+        XCTAssertNil(notifier.trackedMeetingId)
+    }
+
+    func testAdoptingIsIgnoredWhenNotRecording() {
+        let m1 = meeting("m1", from: -60, to: 600)
+        let notifier = makeNotifierWithAutoRecording(m1)
+        isRecording = false
+
+        handOff(notifier, m1)
+
+        XCTAssertTrue(prompts.isEmpty)
+        XCTAssertNil(notifier.trackedMeetingId)
+    }
+
+    /// 다른 알림이 떠 있으면 겹쳐 띄우지 않는다. 그 알림이 사라진 뒤 확인에서 종료 알림이 뜬다.
+    func testAdoptingWhilePromptPendingPromptsEndAfterItIsAnswered() {
+        // 자동이 꺼져 있는 동안 다음 회의의 시작 알림이 떠 있다. 그사이 자동을 켜 녹음이 시작됐다.
+        let m1 = meeting("m1", from: -60, to: 600)
+        let m2 = meeting("m2", from: 0, to: 1800)
+        source.meetingsToReturn = [m2]
+        let notifier = makeNotifier()
+        notifier.setEnabled(true)
+        XCTAssertEqual(notifier.pendingPrompt, .start(m2))
+        source.meetingsToReturn = [m1, m2]
+        isRecording = true
+
+        handOff(notifier, m1)
+        XCTAssertEqual(prompts, [.start(m2)])
+        XCTAssertEqual(notifier.trackedMeetingId, "m1")
+
+        answer(notifier, .cancel)
+        notifier.tick()
+
+        XCTAssertEqual(prompts, [.start(m2), .end(m1)])
+        XCTAssertEqual(notifier.pendingPrompt, .end(m1))
+    }
+
+    func testAdoptedRecordingStopNowStops() {
+        let m1 = meeting("m1", from: -60, to: 600)
+        let notifier = makeNotifierWithAutoRecording(m1)
+        handOff(notifier, m1)
+
+        answer(notifier, .stopNow)
+
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertNil(notifier.pendingPrompt)
+        XCTAssertNil(notifier.trackedMeetingId)
+    }
+
+    func testAdoptedRecordingStopLaterSchedulesStop() {
+        let m1 = meeting("m1", from: -60, to: 600)
+        let notifier = makeNotifierWithAutoRecording(m1)
+        handOff(notifier, m1)
+
+        answer(notifier, .stopLater(minutes: 5))
+        XCTAssertEqual(notifier.scheduledStopDate, m1.end.addingTimeInterval(300))
+
+        currentDate = m1.end.addingTimeInterval(299)
+        notifier.tick()
+        XCTAssertEqual(stopCount, 0)
+
+        currentDate = m1.end.addingTimeInterval(300)
+        notifier.tick()
+        XCTAssertEqual(stopCount, 1)
+    }
+
+    func testAdoptedRecordingCancelKeepsRecording() {
+        let m1 = meeting("m1", from: -60, to: 600)
+        let notifier = makeNotifierWithAutoRecording(m1)
+        handOff(notifier, m1)
+
+        answer(notifier, .cancel)
+        currentDate = m1.end.addingTimeInterval(60)
+        notifier.tick()
+
+        XCTAssertEqual(stopCount, 0)
+        XCTAssertTrue(isRecording)
+        XCTAssertNil(notifier.pendingPrompt)
+        XCTAssertEqual(prompts, [.end(m1)])
+    }
+
+    /// 넘겨받기가 두 번 불리거나 tick이 이어져도 같은 회의로 두 번 묻지 않는다.
+    func testAdoptingSameMeetingTwiceDoesNotPromptAgain() {
+        let m1 = meeting("m1", from: -60, to: 600)
+        let notifier = makeNotifierWithAutoRecording(m1)
+        handOff(notifier, m1)
+        answer(notifier, .cancel)
+
+        notifier.adoptEndedRecording(of: m1)
+        notifier.tick()
+        currentDate = m1.end.addingTimeInterval(60)
+        notifier.tick()
+
+        XCTAssertEqual(prompts, [.end(m1)])
     }
 }

@@ -19,8 +19,9 @@ enum MeetingNotificationResponse: Equatable {
 /// 캘린더 회의 시작·종료 시각에 맞춰 녹음 시작/중단 알림을 띄운다.
 ///
 /// 자동 녹음과 달리 스스로 녹음을 시작하거나 끝내지 않는다. 결정은 늘 사용자가 알림에서 한다.
-/// 자동 녹음과 겹치지 않도록, 자동이 켜져 있으면 시작 알림을 띄우지 않고 자동이 시작한 녹음에는
-/// 종료 알림도 띄우지 않는다(자동이 회의 끝에 알아서 멈춘다).
+/// 자동 녹음과 겹치지 않도록, 자동이 켜져 있으면 시작 알림을 띄우지 않는다. 자동이 녹음을 맡고 있는
+/// 동안에는 끼어들지 않다가, 회의가 끝나면 자동이 녹음을 멈추지 않고 넘겨준다(`adoptEndedRecording(of:)`).
+/// 그때부터 수동 녹음처럼 종료 알림으로 끝낼지 묻는다.
 final class MeetingNotificationCoordinator {
     private static let enabledKey = "meetingNotificationsEnabled"
     /// "몇 분 후 종료"에서 고를 수 있는 시간(분).
@@ -48,7 +49,7 @@ final class MeetingNotificationCoordinator {
     var isStartInFlightProvider: (() -> Bool)?
     /// 자동 녹음이 켜져 있으면 회의 시작은 자동이 맡는다.
     var isAutoEnabledProvider: (() -> Bool)?
-    /// 지금 녹음이 자동으로 시작된 것이면 자동이 회의 끝에 스스로 멈춘다.
+    /// 지금 녹음을 자동이 맡고 있는지. 맡고 있는 동안에는 자동이 알아서 하므로 지켜보지 않는다.
     var isAutoRecordingProvider: (() -> Bool)?
     /// 음성 메모 앱이 직접 녹음 중인지. 그동안에는 시작 알림을 띄우지 않는다.
     var isExternalRecordingProvider: (() -> Bool)?
@@ -123,6 +124,20 @@ final class MeetingNotificationCoordinator {
         if case .end = pendingPrompt {
             clearPendingPrompt()
         }
+    }
+
+    /// 자동 녹음이 회의가 끝난 녹음을 멈추지 않고 넘겨줬다. 그 회의의 종료 알림을 바로 띄운다.
+    ///
+    /// 다른 알림이 떠 있으면 그 회의를 지켜보기만 한다. 떠 있던 알림이 사라진 뒤 `tick()`에서
+    /// 지켜보던 회의가 이미 끝났으므로 종료 알림이 뜬다.
+    func adoptEndedRecording(of meeting: Meeting) {
+        guard isEnabled, isRecording else { return }
+        trackedMeetingId = meeting.id
+        guard pendingPrompt == nil,
+              scheduledStopDate == nil,
+              endPromptedIds[meeting.id] == nil else { return }
+        endPromptedIds[meeting.id] = meeting.end
+        present(.end(meeting))
     }
 
     /// 알림에서 요청한 녹음 시작이 실패했다.
@@ -224,7 +239,8 @@ final class MeetingNotificationCoordinator {
     }
 
     private func checkRecording(meetings: [Meeting], current: [Meeting], at referenceDate: Date) {
-        // 자동이 시작한 녹음은 자동이 회의 끝에 멈춘다. 그 시간대 회의는 자동을 꺼 녹음이 멈춰도 다시 묻지 않는다.
+        // 자동이 맡은 녹음은 자동이 회의 끝에 멈추거나 이쪽으로 넘겨준다. 그 시간대 회의는 자동을 꺼 녹음이
+        // 멈춰도 다시 묻지 않는다.
         if isAutoRecordingProvider?() == true {
             markStartHandled(current)
             return

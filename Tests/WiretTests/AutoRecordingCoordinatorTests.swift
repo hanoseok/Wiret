@@ -957,4 +957,239 @@ final class AutoRecordingCoordinatorTests: XCTestCase {
 
         XCTAssertFalse(sleepPreventer.isActive)
     }
+
+    // MARK: - 회의 종료를 알림에 넘기기
+
+    /// 알림이 켜져 있으면 회의가 끝나도 멈추지 않고 알림에 넘긴다. 이후로는 수동 녹음이라 건드리지 않는다.
+    func testMeetingEndIsHandedOffWhenProviderAllows() {
+        let coordinator = makeCoordinator()
+        var isRecording = false
+        coordinator.isRecordingProvider = { isRecording }
+        var startCount = 0
+        coordinator.onStart = { _ in
+            startCount += 1
+            isRecording = true
+        }
+        var stopCount = 0
+        coordinator.onStop = {
+            stopCount += 1
+            isRecording = false
+        }
+        coordinator.shouldHandOffEndProvider = { true }
+        var handedOff: [Meeting] = []
+        coordinator.onHandOffEnd = { handedOff.append($0) }
+        let meeting = inProgressMeeting()
+        source.meetingsToReturn = [meeting]
+
+        coordinator.setEnabled(true)
+        XCTAssertEqual(coordinator.autoMeetingId, meeting.id)
+
+        currentDate = meeting.end
+        coordinator.tick()
+
+        XCTAssertEqual(stopCount, 0)
+        XCTAssertEqual(handedOff, [meeting])
+        XCTAssertNil(coordinator.autoMeetingId)
+        XCTAssertTrue(isRecording)
+
+        currentDate = meeting.end.addingTimeInterval(60)
+        coordinator.tick()
+        coordinator.tick()
+
+        XCTAssertEqual(stopCount, 0)
+        XCTAssertEqual(handedOff.count, 1)
+
+        // 사용자가 알림에서 녹음을 끝낸 뒤 캘린더에서 회의가 연장돼도, 넘긴 회의를 다시 시작하지 않는다.
+        isRecording = false
+        source.meetingsToReturn = [
+            Meeting(id: meeting.id, title: meeting.title, start: meeting.start, end: meeting.end.addingTimeInterval(1800))
+        ]
+        coordinator.tick()
+
+        XCTAssertEqual(startCount, 1)
+    }
+
+    func testMeetingEndStopsWhenProviderDeclines() {
+        let coordinator = makeCoordinator()
+        var isRecording = false
+        coordinator.isRecordingProvider = { isRecording }
+        coordinator.onStart = { _ in isRecording = true }
+        var stopCount = 0
+        coordinator.onStop = {
+            stopCount += 1
+            isRecording = false
+        }
+        coordinator.shouldHandOffEndProvider = { false }
+        var handOffCount = 0
+        coordinator.onHandOffEnd = { _ in handOffCount += 1 }
+        let meeting = inProgressMeeting()
+        source.meetingsToReturn = [meeting]
+
+        coordinator.setEnabled(true)
+        currentDate = meeting.end
+        coordinator.tick()
+
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(handOffCount, 0)
+        XCTAssertNil(coordinator.autoMeetingId)
+    }
+
+    func testMeetingEndStopsWhenProviderIsMissing() {
+        let coordinator = makeCoordinator()
+        var isRecording = false
+        coordinator.isRecordingProvider = { isRecording }
+        coordinator.onStart = { _ in isRecording = true }
+        var stopCount = 0
+        coordinator.onStop = {
+            stopCount += 1
+            isRecording = false
+        }
+        var handOffCount = 0
+        coordinator.onHandOffEnd = { _ in handOffCount += 1 }
+        let meeting = inProgressMeeting()
+        source.meetingsToReturn = [meeting]
+
+        coordinator.setEnabled(true)
+        currentDate = meeting.end
+        coordinator.tick()
+
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(handOffCount, 0)
+    }
+
+    /// 회의를 빼는 것은 녹음하지 말라는 뜻이다. 알림이 켜져 있어도 묻지 않고 바로 멈춘다.
+    func testExcludingRunningMeetingStopsEvenWhenHandOffAllowed() {
+        let coordinator = makeCoordinator()
+        var isRecording = false
+        coordinator.isRecordingProvider = { isRecording }
+        coordinator.onStart = { _ in isRecording = true }
+        var stopCount = 0
+        coordinator.onStop = {
+            stopCount += 1
+            isRecording = false
+        }
+        coordinator.shouldHandOffEndProvider = { true }
+        var handOffCount = 0
+        coordinator.onHandOffEnd = { _ in handOffCount += 1 }
+        var excluded: Set<String> = []
+        coordinator.excludedMeetingIdsProvider = { excluded }
+        let meeting = inProgressMeeting()
+        source.meetingsToReturn = [meeting]
+
+        coordinator.setEnabled(true)
+        // 회의가 끝난 뒤에 빼더라도 넘기지 않는다.
+        currentDate = meeting.end
+        excluded = [meeting.id]
+        coordinator.tick()
+
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(handOffCount, 0)
+    }
+
+    /// 캘린더에서 회의를 지운 것도 녹음할 회의가 없어진 것이라 바로 멈춘다.
+    func testDeletingRunningMeetingStopsEvenWhenHandOffAllowed() {
+        let coordinator = makeCoordinator()
+        var isRecording = false
+        coordinator.isRecordingProvider = { isRecording }
+        coordinator.onStart = { _ in isRecording = true }
+        var stopCount = 0
+        coordinator.onStop = {
+            stopCount += 1
+            isRecording = false
+        }
+        coordinator.shouldHandOffEndProvider = { true }
+        var handOffCount = 0
+        coordinator.onHandOffEnd = { _ in handOffCount += 1 }
+        source.meetingsToReturn = [inProgressMeeting()]
+
+        coordinator.setEnabled(true)
+        source.meetingsToReturn = []
+        coordinator.tick()
+
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(handOffCount, 0)
+    }
+
+    /// 자동을 끄면 자동 녹음을 끝내라는 뜻이다. 알림이 켜져 있어도 바로 멈춘다.
+    func testDisablingAutoStopsEvenWhenHandOffAllowed() {
+        let coordinator = makeCoordinator()
+        var isRecording = false
+        coordinator.isRecordingProvider = { isRecording }
+        coordinator.onStart = { _ in isRecording = true }
+        var stopCount = 0
+        coordinator.onStop = {
+            stopCount += 1
+            isRecording = false
+        }
+        coordinator.shouldHandOffEndProvider = { true }
+        var handOffCount = 0
+        coordinator.onHandOffEnd = { _ in handOffCount += 1 }
+        let meeting = inProgressMeeting()
+        source.meetingsToReturn = [meeting]
+
+        coordinator.setEnabled(true)
+        currentDate = meeting.end
+        coordinator.setEnabled(false)
+
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(handOffCount, 0)
+    }
+
+    /// 연달아 잡힌 회의: 넘긴 녹음이 이어지는 동안에는 다음 회의를 시작하지 않고, 녹음이 끝나면 시작한다.
+    func testBackToBackHandOffStartsNextMeetingOnlyAfterRecordingStops() {
+        let coordinator = makeCoordinator()
+        var isRecording = false
+        coordinator.isRecordingProvider = { isRecording }
+        var started: [String] = []
+        coordinator.onStart = { meeting in
+            started.append(meeting.id)
+            isRecording = true
+        }
+        var stopCount = 0
+        coordinator.onStop = {
+            stopCount += 1
+            isRecording = false
+        }
+        coordinator.shouldHandOffEndProvider = { true }
+        var handedOff: [String] = []
+        coordinator.onHandOffEnd = { handedOff.append($0.id) }
+
+        let meetingA = Meeting(
+            id: "A",
+            title: "Meeting A",
+            start: currentDate,
+            end: currentDate.addingTimeInterval(3600)
+        )
+        let meetingB = Meeting(
+            id: "B",
+            title: "Meeting B",
+            start: currentDate.addingTimeInterval(3600),
+            end: currentDate.addingTimeInterval(7200)
+        )
+        source.meetingsToReturn = [meetingA, meetingB]
+
+        currentDate = meetingA.start.addingTimeInterval(1800)
+        coordinator.setEnabled(true)
+        XCTAssertEqual(started, ["A"])
+
+        currentDate = meetingB.start.addingTimeInterval(5)
+        coordinator.tick()
+
+        XCTAssertEqual(handedOff, ["A"])
+        XCTAssertEqual(stopCount, 0)
+        XCTAssertEqual(started, ["A"])
+        XCTAssertNil(coordinator.autoMeetingId)
+
+        currentDate = meetingB.start.addingTimeInterval(15)
+        coordinator.tick()
+        XCTAssertEqual(started, ["A"])
+
+        // 사용자가 알림에서 "지금 종료"를 골랐다.
+        isRecording = false
+        currentDate = meetingB.start.addingTimeInterval(25)
+        coordinator.tick()
+
+        XCTAssertEqual(started, ["A", "B"])
+        XCTAssertEqual(coordinator.autoMeetingId, "B")
+    }
 }

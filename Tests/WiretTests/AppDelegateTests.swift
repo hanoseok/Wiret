@@ -686,6 +686,48 @@ final class AppDelegateTests: XCTestCase {
         XCTAssertNil(delegate.meetingNotifier.pendingPrompt)
     }
 
+    /// 알림이 켜져 있으면 자동 녹음도 회의가 끝날 때 멈추지 않고 종료 알림으로 묻는다.
+    func testAutoRecordingEndShowsEndPromptWhenNotificationsAreOn() {
+        let start = Date().addingTimeInterval(-600)
+        calendarSource.meetingsToReturn = [
+            Meeting(id: "m1", title: "회의", start: start, end: start.addingTimeInterval(1800))
+        ]
+        // 실제 녹음기와 마이크 권한을 건드리지 않도록 녹음이 시작된 상태만 흉내 낸다.
+        delegate.coordinator.onStart = { [weak delegate] _ in delegate?.state = .recording }
+        delegate.perform(#selector(AppDelegate.toggleAutoForTesting))
+        delegate.perform(#selector(AppDelegate.toggleNotificationsForTesting))
+        XCTAssertEqual(delegate.coordinator.autoMeetingId, "m1")
+        XCTAssertNil(delegate.meetingNotifier.pendingPrompt)
+
+        // 캘린더에서 회의를 앞당겨 끝낸 것처럼 종료 시각을 지금 이전으로 바꾼다.
+        let ended = Meeting(id: "m1", title: "회의", start: start, end: start.addingTimeInterval(300))
+        calendarSource.meetingsToReturn = [ended]
+        calendarSource.onChange?()
+
+        XCTAssertEqual(delegate.meetingNotifier.pendingPrompt, .end(ended))
+        XCTAssertEqual(delegate.state, .recording)
+        XCTAssertNil(delegate.coordinator.autoMeetingId)
+    }
+
+    /// 알림이 꺼져 있으면 예전처럼 자동이 회의 끝에 녹음을 멈춘다.
+    func testAutoRecordingEndStopsWhenNotificationsAreOff() {
+        let start = Date().addingTimeInterval(-600)
+        calendarSource.meetingsToReturn = [
+            Meeting(id: "m1", title: "회의", start: start, end: start.addingTimeInterval(1800))
+        ]
+        delegate.coordinator.onStart = { [weak delegate] _ in delegate?.state = .recording }
+        delegate.perform(#selector(AppDelegate.toggleAutoForTesting))
+        XCTAssertEqual(delegate.state, .recording)
+
+        calendarSource.meetingsToReturn = [
+            Meeting(id: "m1", title: "회의", start: start, end: start.addingTimeInterval(300))
+        ]
+        calendarSource.onChange?()
+
+        XCTAssertEqual(delegate.state, .idle)
+        XCTAssertNil(delegate.meetingNotifier.pendingPrompt)
+    }
+
     // MARK: - 캘린더 선택
 
     private var calendarMenu: NSMenu {
