@@ -18,18 +18,44 @@ private final class FakeUpdateChecker: UpdateChecking {
     }
 }
 
+/// 확인 결과를 붙잡아 두어 "확인이 아직 진행 중인" 순간을 만든다.
+private final class HoldingUpdateChecker: UpdateChecking {
+    private(set) var fetchCount = 0
+    private var pending: [(Result<[ReleaseInfo], UpdateError>) -> Void] = []
+
+    func fetchReleases(completion: @escaping (Result<[ReleaseInfo], UpdateError>) -> Void) {
+        fetchCount += 1
+        pending.append(completion)
+    }
+
+    func download(_ release: ReleaseInfo, completion: @escaping (Result<URL, UpdateError>) -> Void) {
+        completion(.failure(.network("테스트에서는 내려받지 않습니다")))
+    }
+
+    func complete(with result: Result<[ReleaseInfo], UpdateError>) {
+        let completions = pending
+        pending = []
+        completions.forEach { $0(result) }
+    }
+}
+
 final class UpdateCoordinatorTests: XCTestCase {
     private var checker: FakeUpdateChecker!
     private var offered: [ReleaseInfo] = []
+    /// 각 제안이 수동 확인에서 나왔는지. 자동 확인만 창을 띄우므로 구분이 맞아야 한다.
+    private var offeredUserInitiated: [Bool] = []
     private var upToDateCount = 0
-    private var errors: [UpdateError] = []
+    private var checkErrors: [UpdateError] = []
+    private var installErrors: [UpdateError] = []
 
     override func setUp() {
         super.setUp()
         checker = FakeUpdateChecker()
         offered = []
+        offeredUserInitiated = []
         upToDateCount = 0
-        errors = []
+        checkErrors = []
+        installErrors = []
     }
 
     private func release(_ tag: String) -> ReleaseInfo {
@@ -40,15 +66,19 @@ final class UpdateCoordinatorTests: XCTestCase {
         )
     }
 
-    private func makeCoordinator(current: String?) -> UpdateCoordinator {
+    private func makeCoordinator(current: String?, checker: UpdateChecking? = nil) -> UpdateCoordinator {
         let coordinator = UpdateCoordinator(
             currentVersion: current.flatMap(AppVersion.parse),
-            checker: checker,
+            checker: checker ?? self.checker,
             bundleURL: URL(fileURLWithPath: "/tmp/Wiret.app")
         )
-        coordinator.onUpdateAvailable = { [weak self] in self?.offered.append($0) }
+        coordinator.onUpdateAvailable = { [weak self] release, userInitiated in
+            self?.offered.append(release)
+            self?.offeredUserInitiated.append(userInitiated)
+        }
         coordinator.onUpToDate = { [weak self] _ in self?.upToDateCount += 1 }
-        coordinator.onError = { [weak self] in self?.errors.append($0) }
+        coordinator.onCheckFailed = { [weak self] in self?.checkErrors.append($0) }
+        coordinator.onError = { [weak self] in self?.installErrors.append($0) }
         return coordinator
     }
 
@@ -81,6 +111,43 @@ final class UpdateCoordinatorTests: XCTestCase {
 
         coordinator.check(userInitiated: true)
         XCTAssertEqual(upToDateCount, 1)
+    }
+
+    /// 받는 쪽은 이 값으로 메뉴 안에 보여 줄지, 창으로 물을지 정한다.
+    func testOfferTellsWhetherTheCheckWasManual() {
+        checker.releasesResult = .success([release("0.0.8-SNAPSHOT")])
+        let coordinator = makeCoordinator(current: "0.0.7-SNAPSHOT")
+
+        coordinator.check(userInitiated: false)
+        coordinator.check(userInitiated: true)
+
+        XCTAssertEqual(offeredUserInitiated, [false, true])
+    }
+
+    /// 자동 확인이 도는 사이에 눌러도 답을 받아야 한다. 안 그러면 메뉴가 "확인 중"에 멈춘다.
+    func testManualCheckDuringAutomaticCheckGetsTheResult() {
+        let holding = HoldingUpdateChecker()
+        let coordinator = makeCoordinator(current: "0.0.7-SNAPSHOT", checker: holding)
+
+        coordinator.check(userInitiated: false)
+        coordinator.check(userInitiated: true)
+        XCTAssertEqual(holding.fetchCount, 1, "진행 중인 확인을 두고 또 묻지 않습니다")
+
+        holding.complete(with: .success([release("0.0.7-SNAPSHOT")]))
+
+        XCTAssertEqual(upToDateCount, 1)
+        XCTAssertFalse(coordinator.isChecking)
+    }
+
+    func testManualCheckDuringAutomaticCheckIsReportedAsManual() {
+        let holding = HoldingUpdateChecker()
+        let coordinator = makeCoordinator(current: "0.0.7-SNAPSHOT", checker: holding)
+
+        coordinator.check(userInitiated: false)
+        coordinator.check(userInitiated: true)
+        holding.complete(with: .success([release("0.0.8-SNAPSHOT")]))
+
+        XCTAssertEqual(offeredUserInitiated, [true])
     }
 
     // MARK: - 방해하지 않기
@@ -155,11 +222,12 @@ final class UpdateCoordinatorTests: XCTestCase {
 
         coordinator.check(userInitiated: false)
         XCTAssertEqual(checker.fetchCount, 0)
-        XCTAssertTrue(errors.isEmpty)
+        XCTAssertTrue(checkErrors.isEmpty)
 
         coordinator.check(userInitiated: true)
         XCTAssertEqual(checker.fetchCount, 0)
-        XCTAssertEqual(errors.count, 1)
+        XCTAssertEqual(checkErrors.count, 1)
+        XCTAssertTrue(installErrors.isEmpty)
     }
 
     // MARK: - 오류
@@ -169,10 +237,11 @@ final class UpdateCoordinatorTests: XCTestCase {
         let coordinator = makeCoordinator(current: "0.0.7-SNAPSHOT")
 
         coordinator.check(userInitiated: false)
-        XCTAssertTrue(errors.isEmpty, "자동 확인 실패로 사용자를 방해하지 않습니다")
+        XCTAssertTrue(checkErrors.isEmpty, "자동 확인 실패로 사용자를 방해하지 않습니다")
 
         coordinator.check(userInitiated: true)
-        XCTAssertEqual(errors.count, 1)
+        XCTAssertEqual(checkErrors, [.network("끊김")])
+        XCTAssertTrue(installErrors.isEmpty, "확인 실패는 설치 실패와 섞이지 않습니다")
     }
 
     func testDownloadFailureIsReported() {
@@ -181,6 +250,7 @@ final class UpdateCoordinatorTests: XCTestCase {
 
         coordinator.install(release("0.0.8-SNAPSHOT"))
 
-        XCTAssertEqual(errors, [.badResponse(404)])
+        XCTAssertEqual(installErrors, [.badResponse(404)])
+        XCTAssertTrue(checkErrors.isEmpty)
     }
 }

@@ -43,6 +43,46 @@ private final class FakeUpdateCheckerForVersionTest: UpdateChecking {
     }
 }
 
+/// 메뉴 안 업데이트 확인 테스트에서 쓴다. 결과를 바로 돌려주거나, 붙잡아 두었다가 나중에 돌려준다.
+private final class StubUpdateChecker: UpdateChecking {
+    var releasesResult: Result<[ReleaseInfo], UpdateError> = .success([])
+    var downloadResult: Result<URL, UpdateError> = .failure(.network("테스트에서는 내려받지 않습니다"))
+    /// 켜 두면 결과를 붙잡아 "확인 중"·"내려받는 중" 상태를 관찰할 수 있다.
+    var holdsCompletions = false
+    private(set) var downloadedReleases: [ReleaseInfo] = []
+    private var pendingFetches: [(Result<[ReleaseInfo], UpdateError>) -> Void] = []
+    private var pendingDownloads: [(Result<URL, UpdateError>) -> Void] = []
+
+    func fetchReleases(completion: @escaping (Result<[ReleaseInfo], UpdateError>) -> Void) {
+        if holdsCompletions {
+            pendingFetches.append(completion)
+        } else {
+            completion(releasesResult)
+        }
+    }
+
+    func download(_ release: ReleaseInfo, completion: @escaping (Result<URL, UpdateError>) -> Void) {
+        downloadedReleases.append(release)
+        if holdsCompletions {
+            pendingDownloads.append(completion)
+        } else {
+            completion(downloadResult)
+        }
+    }
+
+    func finishFetches() {
+        let completions = pendingFetches
+        pendingFetches = []
+        completions.forEach { $0(releasesResult) }
+    }
+
+    func finishDownloads() {
+        let completions = pendingDownloads
+        pendingDownloads = []
+        completions.forEach { $0(downloadResult) }
+    }
+}
+
 private final class StubMeetingSource: MeetingSource {
     var onChange: (() -> Void)?
     var availableCalendars: [CalendarInfo] = []
@@ -163,6 +203,218 @@ final class AppDelegateTests: XCTestCase {
 
         XCTAssertEqual(versionedDelegate.versionItem.title, "현재 버전: 0.0.11-SNAPSHOT")
         XCTAssertTrue(versionedDelegate.updateItem.isEnabled)
+    }
+
+    // MARK: - 메뉴 안에서 업데이트 확인
+
+    private func release(_ tag: String) -> ReleaseInfo {
+        ReleaseInfo(
+            version: AppVersion.parse(tag)!,
+            downloadURL: URL(string: "https://example.com/\(tag).zip")!,
+            pageURL: nil
+        )
+    }
+
+    /// 배포 빌드처럼 버전을 아는 delegate를 띄운다. 실행 직후의 자동 확인까지 끝난 상태로 돌려준다.
+    private func makeVersionedDelegate(checker: StubUpdateChecker) -> AppDelegate {
+        let coordinator = UpdateCoordinator(
+            currentVersion: AppVersion.parse("0.0.12-SNAPSHOT"),
+            checker: checker,
+            bundleURL: URL(fileURLWithPath: "/tmp/Wiret.app")
+        )
+        let versionedDelegate = AppDelegate(
+            defaults: UserDefaults(suiteName: suiteName)!,
+            voiceMemosImporter: VoiceMemosImporter(runner: shortcutRunner),
+            shortcutInstaller: VoiceMemosShortcutInstaller(installer: shortcutInstaller),
+            calendarSource: calendarSource,
+            updateCoordinator: coordinator
+        )
+        versionedDelegate.suppressAlertsForTesting = true
+        versionedDelegate.applicationDidFinishLaunching(
+            Notification(name: NSApplication.didFinishLaunchingNotification)
+        )
+        addTeardownBlock { NSStatusBar.system.removeStatusItem(versionedDelegate.statusItem) }
+        drainMainQueue()
+        return versionedDelegate
+    }
+
+    /// 업데이트 콜백은 메인 큐로 넘어와 반영된다. 그 뒤에 줄 선 블록이 돌면 앞선 반영도 끝난 것이다.
+    private func drainMainQueue() {
+        let drained = expectation(description: "메인 큐 비우기")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 1)
+    }
+
+    private func clickUpdateItem(of delegate: AppDelegate) {
+        guard let view = delegate.updateItem.view as? MenuActionItemView else {
+            XCTFail("업데이트 확인 항목에 뷰가 없습니다")
+            return
+        }
+        view.performClick()
+    }
+
+    /// 일반 항목은 누르면 메뉴가 닫힌다. 뷰를 달아야 확인하는 동안 메뉴가 열려 있다.
+    func testUpdateItemUsesViewThatKeepsMenuOpen() {
+        XCTAssertTrue(delegate.updateItem.view is MenuActionItemView)
+    }
+
+    /// 로컬 빌드는 확인할 수 없으니 뷰도 눌리지 않아야 한다.
+    func testUpdateItemViewIsDisabledForLocalBuild() {
+        let view = delegate.updateItem.view as? MenuActionItemView
+        XCTAssertEqual(view?.isEnabled, false)
+        XCTAssertNotNil(view?.toolTip)
+        XCTAssertEqual(delegate.updateItem.title, "업데이트 확인")
+    }
+
+    func testManualCheckShowsUpToDateInline() {
+        let checker = StubUpdateChecker()
+        let versionedDelegate = makeVersionedDelegate(checker: checker)
+
+        clickUpdateItem(of: versionedDelegate)
+        drainMainQueue()
+
+        XCTAssertEqual(versionedDelegate.updateItem.title, "최신 버전입니다")
+        XCTAssertEqual((versionedDelegate.updateItem.view as? MenuActionItemView)?.title, "최신 버전입니다")
+        XCTAssertTrue(versionedDelegate.updateItem.isEnabled, "다시 눌러 확인할 수 있어야 합니다")
+        XCTAssertNil(versionedDelegate.updateAvailableItem)
+        XCTAssertEqual(versionedDelegate.statusItem.menu?.items.count, 14)
+    }
+
+    func testManualCheckShowsUpdateButtonRightAfterUpdateItem() {
+        let checker = StubUpdateChecker()
+        let versionedDelegate = makeVersionedDelegate(checker: checker)
+        checker.releasesResult = .success([release("0.0.13-SNAPSHOT")])
+
+        clickUpdateItem(of: versionedDelegate)
+        drainMainQueue()
+
+        guard let menu = versionedDelegate.statusItem.menu,
+              let button = versionedDelegate.updateAvailableItem else {
+            XCTFail("업데이트 버튼이 없습니다")
+            return
+        }
+        let updateIndex = menu.index(of: versionedDelegate.updateItem)
+        XCTAssertEqual(menu.index(of: button), updateIndex + 1)
+        XCTAssertEqual(menu.index(of: versionedDelegate.versionItem), updateIndex + 2)
+        XCTAssertEqual(button.title, "0.0.13-SNAPSHOT으로 업데이트")
+        XCTAssertTrue(button.isEnabled)
+        XCTAssertEqual(versionedDelegate.updateItem.title, "업데이트 확인")
+        XCTAssertEqual(menu.items.count, 15)
+    }
+
+    func testManualCheckFailureShowsRetryTitle() {
+        let checker = StubUpdateChecker()
+        let versionedDelegate = makeVersionedDelegate(checker: checker)
+        checker.releasesResult = .failure(.badResponse(403))
+
+        clickUpdateItem(of: versionedDelegate)
+        drainMainQueue()
+
+        XCTAssertEqual(versionedDelegate.updateItem.title, "업데이트 확인 실패 · 다시 시도")
+        XCTAssertTrue(versionedDelegate.updateItem.isEnabled)
+        XCTAssertEqual(
+            versionedDelegate.updateItem.view?.toolTip,
+            UpdateError.badResponse(403).errorDescription
+        )
+        XCTAssertNil(versionedDelegate.updateAvailableItem)
+    }
+
+    /// 확인하는 동안 또 누르면 같은 요청이 겹친다.
+    func testUpdateItemIsDisabledWhileChecking() {
+        let checker = StubUpdateChecker()
+        let versionedDelegate = makeVersionedDelegate(checker: checker)
+        checker.holdsCompletions = true
+
+        clickUpdateItem(of: versionedDelegate)
+        drainMainQueue()
+
+        XCTAssertEqual(versionedDelegate.updateItem.title, "업데이트 확인 중…")
+        XCTAssertFalse(versionedDelegate.updateItem.isEnabled)
+        XCTAssertEqual((versionedDelegate.updateItem.view as? MenuActionItemView)?.isEnabled, false)
+
+        checker.finishFetches()
+        drainMainQueue()
+
+        XCTAssertEqual(versionedDelegate.updateItem.title, "최신 버전입니다")
+    }
+
+    /// 며칠 지난 "최신 버전입니다"가 남으면 지금도 최신인 것처럼 읽힌다.
+    func testMenuWillOpenResetsFinishedStatus() {
+        let checker = StubUpdateChecker()
+        let versionedDelegate = makeVersionedDelegate(checker: checker)
+        clickUpdateItem(of: versionedDelegate)
+        drainMainQueue()
+        XCTAssertEqual(versionedDelegate.updateItem.title, "최신 버전입니다")
+
+        versionedDelegate.menuWillOpen(versionedDelegate.statusItem.menu!)
+
+        XCTAssertEqual(versionedDelegate.updateItem.title, "업데이트 확인")
+        XCTAssertTrue(versionedDelegate.updateItem.isEnabled)
+    }
+
+    /// 확인이 아직 끝나지 않았다면 메뉴를 다시 열어도 진행 중임을 보여 줘야 한다.
+    func testMenuWillOpenKeepsCheckingStatus() {
+        let checker = StubUpdateChecker()
+        let versionedDelegate = makeVersionedDelegate(checker: checker)
+        checker.holdsCompletions = true
+        clickUpdateItem(of: versionedDelegate)
+
+        versionedDelegate.menuWillOpen(versionedDelegate.statusItem.menu!)
+
+        XCTAssertEqual(versionedDelegate.updateItem.title, "업데이트 확인 중…")
+    }
+
+    /// 자동 확인은 창으로 묻고, 창을 닫은 뒤에도 메뉴에서 업데이트할 수 있게 버튼을 남긴다.
+    func testAutomaticCheckFindingUpdateShowsButton() {
+        let checker = StubUpdateChecker()
+        checker.releasesResult = .success([release("0.0.13-SNAPSHOT")])
+
+        let versionedDelegate = makeVersionedDelegate(checker: checker)
+
+        XCTAssertEqual(versionedDelegate.updateAvailableItem?.title, "0.0.13-SNAPSHOT으로 업데이트")
+        XCTAssertEqual(versionedDelegate.updateItem.title, "업데이트 확인")
+    }
+
+    /// 버튼은 하나만 두고, 더 새 버전이 나오면 그 버튼을 고쳐 쓴다.
+    func testNewerReleaseUpdatesExistingButton() {
+        let checker = StubUpdateChecker()
+        checker.releasesResult = .success([release("0.0.13-SNAPSHOT")])
+        let versionedDelegate = makeVersionedDelegate(checker: checker)
+
+        checker.releasesResult = .success([release("0.0.13-SNAPSHOT"), release("0.0.14-SNAPSHOT")])
+        clickUpdateItem(of: versionedDelegate)
+        drainMainQueue()
+
+        let menu = versionedDelegate.statusItem.menu!
+        XCTAssertEqual(menu.items.filter { $0.title.hasSuffix("으로 업데이트") }.count, 1)
+        XCTAssertEqual(versionedDelegate.updateAvailableItem?.title, "0.0.14-SNAPSHOT으로 업데이트")
+        XCTAssertEqual(menu.items.count, 15)
+    }
+
+    /// 내려받는 동안에는 또 누르지 못하게 막고, 실패하면 다시 누를 수 있게 되돌린다.
+    func testUpdateButtonShowsDownloadingAndRecoversFromFailure() {
+        let checker = StubUpdateChecker()
+        checker.releasesResult = .success([release("0.0.13-SNAPSHOT")])
+        let versionedDelegate = makeVersionedDelegate(checker: checker)
+        checker.holdsCompletions = true
+        guard let menu = versionedDelegate.statusItem.menu,
+              let button = versionedDelegate.updateAvailableItem else {
+            XCTFail("업데이트 버튼이 없습니다")
+            return
+        }
+
+        menu.performActionForItem(at: menu.index(of: button))
+
+        XCTAssertEqual(checker.downloadedReleases.map(\.version.description), ["0.0.13-SNAPSHOT"])
+        XCTAssertEqual(button.title, "업데이트 내려받는 중…")
+        XCTAssertFalse(button.isEnabled)
+
+        checker.downloadResult = .failure(.badResponse(404))
+        checker.finishDownloads()
+        drainMainQueue()
+
+        XCTAssertEqual(button.title, "0.0.13-SNAPSHOT으로 업데이트")
+        XCTAssertTrue(button.isEnabled)
     }
 
     func testAutoItemReflectsPersistedDisabledState() {
