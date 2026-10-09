@@ -43,7 +43,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var startRequestedAt = Date.distantPast
     private var choiceWindow: MeetingChoiceWindowController?
     private var notificationWindow: MeetingNotificationWindowController?
-    private(set) var todayScheduleWindow: TodayScheduleWindowController?
     private lazy var exclusionStore = MeetingExclusionStore(defaults: defaults)
     private let updateCoordinator: UpdateCoordinator
     private var updateTimer: Timer?
@@ -158,12 +157,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         calendarItem.submenu = calendarMenu
         menu.addItem(calendarItem)
 
-        todayScheduleItem = NSMenuItem(
-            title: "오늘의 일정",
-            action: #selector(showTodaySchedule),
-            keyEquivalent: ""
-        )
-        todayScheduleItem.target = self
+        // 회의를 여러 개 연달아 켜고 끄기 쉽도록 창 대신 하위 메뉴로 보여 준다.
+        todayScheduleItem = NSMenuItem(title: "오늘의 일정", action: nil, keyEquivalent: "")
+        todayScheduleItem.submenu = makeTodayScheduleMenu()
         menu.addItem(todayScheduleItem)
 
         updateItem = NSMenuItem(
@@ -413,6 +409,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             rebuildCalendarMenu()
             return
         }
+        // 일정은 언제든 바뀌므로 열 때마다 캘린더를 다시 읽는다.
+        if menu === todayScheduleItem?.submenu {
+            reloadTodayMeetingItems()
+            return
+        }
         refreshShortcutItem()
         // 로그인 항목은 시스템 설정에서도 켜고 끌 수 있으므로 열 때마다 실제 상태를 다시 읽는다.
         refreshLaunchAtLoginItem()
@@ -486,6 +487,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 바뀐 선택으로 지금 회의 상태를 다시 판단한다.
         coordinator.tick()
         meetingNotifier.tick()
+    }
+
+    // MARK: - 오늘의 일정
+
+    private static let meetingTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    /// 회의 줄 아래에 구분선과 새로고침을 한 번만 만들어 둔다.
+    ///
+    /// 새로고침을 누른 채로 그 항목을 지우고 다시 만들면 클릭을 처리하던 뷰가 메뉴에서 떨어져 나간다.
+    /// 그래서 다시 읽을 때는 구분선 위의 회의 줄만 갈아 끼운다.
+    private func makeTodayScheduleMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.delegate = self
+
+        menu.addItem(NSMenuItem.separator())
+
+        let refreshItem = NSMenuItem(
+            title: "새로고침",
+            action: #selector(refreshTodaySchedule),
+            keyEquivalent: ""
+        )
+        refreshItem.target = self
+        // 새로 읽은 목록을 메뉴를 연 채로 바로 보여 주려고 뷰를 쓴다. 키보드로 고르면 위의 action이 불리고 메뉴가 닫힌다.
+        let refreshView = MenuActionItemView(title: "새로고침")
+        refreshView.onClick = { [weak self] in self?.refreshTodaySchedule() }
+        refreshItem.view = refreshView
+        menu.addItem(refreshItem)
+        return menu
+    }
+
+    /// 구분선 위의 회의 줄을 캘린더에서 새로 읽은 오늘 회의로 바꾼다.
+    func reloadTodayMeetingItems() {
+        guard let menu = todayScheduleItem?.submenu else { return }
+        while let first = menu.items.first, !first.isSeparatorItem {
+            menu.removeItem(first)
+        }
+
+        let meetings = todayMeetings()
+        guard !meetings.isEmpty else {
+            let empty = NSMenuItem(title: "오늘 회의가 없습니다", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.insertItem(empty, at: 0)
+            return
+        }
+        for (index, meeting) in meetings.enumerated() {
+            menu.insertItem(makeTodayMeetingItem(meeting), at: index)
+        }
+    }
+
+    private func todayMeetings() -> [Meeting] {
+        let now = Date()
+        // 오늘 하루를 넉넉히 덮도록 앞뒤로 여유를 두고 읽는다.
+        return TodaySchedule.meetings(
+            in: calendarSource.meetings(
+                from: now.addingTimeInterval(-24 * 3600),
+                to: now.addingTimeInterval(24 * 3600)
+            ),
+            on: now
+        )
+    }
+
+    /// 체크된 회의가 자동 녹음·알림 대상이다. 기본은 모두 포함이라 뺀 회의만 체크가 꺼진다.
+    ///
+    /// 일반 메뉴 항목은 누르면 메뉴가 닫혀 여러 회의를 끄려면 메뉴를 몇 번이고 다시 열어야 한다.
+    /// 뷰 안의 클릭은 메뉴를 닫지 않으므로 뷰를 단다.
+    private func makeTodayMeetingItem(_ meeting: Meeting) -> NSMenuItem {
+        let time = "\(Self.meetingTimeFormatter.string(from: meeting.start))–\(Self.meetingTimeFormatter.string(from: meeting.end))"
+        let title = "\(time)   \(meeting.title)"
+
+        let item = NSMenuItem(title: title, action: #selector(toggleTodayMeeting(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = meeting
+        let view = MenuActionItemView(title: title)
+        view.onClick = { [weak self, weak item] in
+            guard let item else { return }
+            self?.toggleTodayMeeting(item)
+        }
+        item.view = view
+        applyTodayMeetingState(to: item, meeting: meeting)
+        return item
+    }
+
+    /// 그려지는 체크마크와 `NSMenuItem.state`를 함께 맞춘다. 키보드 탐색과 테스트는 state를 본다.
+    private func applyTodayMeetingState(to item: NSMenuItem, meeting: Meeting) {
+        let included = !exclusionStore.isExcluded(meeting)
+        item.state = included ? .on : .off
+        (item.view as? MenuActionItemView)?.isChecked = included
+    }
+
+    @objc private func toggleTodayMeeting(_ sender: NSMenuItem) {
+        guard let meeting = sender.representedObject as? Meeting else { return }
+        exclusionStore.setExcluded(!exclusionStore.isExcluded(meeting), meeting: meeting)
+        // 누른 줄의 뷰가 아직 클릭을 처리하는 중이라 목록을 다시 만들지 않고 그 줄만 바꾼다.
+        applyTodayMeetingState(to: sender, meeting: meeting)
+        // 지금 녹음 중인 회의를 뺐다면 곧바로 반영되어야 한다.
+        coordinator.tick()
+        meetingNotifier.tick()
+    }
+
+    @objc private func refreshTodaySchedule() {
+        reloadTodayMeetingItems()
     }
 
     /// 단축어가 이미 있으면 삭제를, 없으면 설치를 제안한다. 둘 중 하나만 보인다.
@@ -922,37 +1029,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.alertStyle = .warning
         alert.addButton(withTitle: "확인")
         alert.runModal()
-    }
-
-    @objc func showTodaySchedule() {
-        let now = Date()
-        // 오늘 하루를 넉넉히 덮도록 앞뒤로 여유를 두고 읽는다.
-        let meetings = TodaySchedule.meetings(
-            in: calendarSource.meetings(
-                from: now.addingTimeInterval(-24 * 3600),
-                to: now.addingTimeInterval(24 * 3600)
-            ),
-            on: now
-        )
-
-        todayScheduleWindow?.dismiss()
-        let controller = TodayScheduleWindowController(
-            meetings: meetings,
-            date: now,
-            isExcluded: { [weak self] meeting in
-                self?.exclusionStore.isExcluded(meeting) ?? false
-            },
-            onToggle: { [weak self] meeting, excluded in
-                guard let self else { return }
-                self.exclusionStore.setExcluded(excluded, meeting: meeting)
-                // 지금 녹음 중인 회의를 뺐다면 곧바로 반영되어야 한다.
-                self.coordinator.tick()
-                self.meetingNotifier.tick()
-            }
-        )
-        todayScheduleWindow = controller
-        if suppressAlertsForTesting { return }
-        controller.show()
     }
 
     private func presentMeetingChoice(_ meetings: [Meeting]) {

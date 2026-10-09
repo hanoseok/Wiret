@@ -959,58 +959,175 @@ final class AppDelegateTests: XCTestCase {
         return Meeting(id: id, title: id, start: start, end: start.addingTimeInterval(1800))
     }
 
-    func testTodayScheduleWindowListsTodaysMeetings() {
+    private var todayMenu: NSMenu {
+        delegate.todayScheduleItem.submenu!
+    }
+
+    /// 하위 메뉴를 여는 것처럼 회의 목록을 다시 읽게 한다.
+    private func openTodayMenu() {
+        delegate.menuWillOpen(todayMenu)
+    }
+
+    private func clickTodayItem(at index: Int) {
+        guard let view = todayMenu.items[index].view as? MenuActionItemView else {
+            return XCTFail("\(index)번째 항목이 누를 수 있는 뷰가 아닙니다")
+        }
+        view.performClick()
+    }
+
+    private func todayCheckmarks() -> [Bool?] {
+        todayMenu.items.map { ($0.view as? MenuActionItemView)?.isChecked }
+    }
+
+    /// 화살표가 붙은 하위 메뉴여야 한다. 직접 단 action이 남아 있으면 누를 때 하위 메뉴 대신 그 일을 한다.
+    /// 하위 메뉴를 달면 AppKit이 action을 `submenuAction(_:)`으로 채우므로 그것만 남아 있어야 한다.
+    func testTodayScheduleIsSubmenuWithoutAction() {
+        XCTAssertNotNil(delegate.todayScheduleItem.submenu)
+        XCTAssertEqual(delegate.todayScheduleItem.action, #selector(NSMenu.submenuAction(_:)))
+        XCTAssertFalse(delegate.todayScheduleItem.target === delegate)
+        XCTAssertFalse(todayMenu.autoenablesItems)
+        XCTAssertTrue(todayMenu.delegate === delegate)
+    }
+
+    func testTodayMenuListsTodaysMeetingsInOrderAboveRefresh() {
+        calendarSource.meetingsToReturn = [
+            todayMeeting(id: "m2", hoursIntoDay: 11),
+            todayMeeting(id: "m1", hoursIntoDay: 9)
+        ]
+
+        openTodayMenu()
+
+        XCTAssertEqual(todayMenu.items.count, 4)
+        XCTAssertEqual(todayMenu.items[0].title, "09:00–09:30   m1")
+        XCTAssertEqual(todayMenu.items[1].title, "11:00–11:30   m2")
+        XCTAssertEqual((todayMenu.items[0].view as? MenuActionItemView)?.title, "09:00–09:30   m1")
+        XCTAssertTrue(todayMenu.items[2].isSeparatorItem)
+        XCTAssertEqual(todayMenu.items[3].title, "새로고침")
+        // 새로고침도 메뉴를 닫지 않아야 새 목록을 바로 볼 수 있다. 상태가 없는 항목이라 체크 칸은 비운다.
+        let refresh = todayMenu.items[3].view as? MenuActionItemView
+        XCTAssertNotNil(refresh)
+        XCTAssertNil(refresh?.isChecked)
+    }
+
+    /// 기본은 모두 포함이므로 처음 열면 전부 체크돼 있어야 한다.
+    func testTodayMenuStartsWithEverythingIncluded() {
         calendarSource.meetingsToReturn = [
             todayMeeting(id: "m1", hoursIntoDay: 9),
             todayMeeting(id: "m2", hoursIntoDay: 11)
         ]
 
-        delegate.showTodaySchedule()
+        openTodayMenu()
 
-        XCTAssertEqual(delegate.todayScheduleWindow?.checkboxes.count, 2)
+        XCTAssertEqual(todayCheckmarks(), [true, true, nil, nil])
+        XCTAssertEqual(todayMenu.items[0].state, .on)
     }
 
-    /// 기본은 모두 포함이므로 처음 열면 전부 체크돼 있어야 한다.
-    func testTodayScheduleStartsWithEverythingIncluded() {
+    /// 누르면 그 회의만 자동 녹음·알림에서 빠지고, 목록은 그대로 남아 이어서 누를 수 있어야 한다.
+    func testClickingMeetingExcludesItInPlace() {
+        calendarSource.meetingsToReturn = [
+            todayMeeting(id: "m1", hoursIntoDay: 9),
+            todayMeeting(id: "m2", hoursIntoDay: 11)
+        ]
+        openTodayMenu()
+        let itemsBefore = todayMenu.items
+
+        clickTodayItem(at: 1)
+
+        XCTAssertEqual(todayCheckmarks(), [true, false, nil, nil])
+        XCTAssertEqual(todayMenu.items[1].state, .off)
+        XCTAssertEqual(delegate.coordinator.excludedMeetingIdsProvider?(), ["m2"])
+        XCTAssertEqual(delegate.meetingNotifier.excludedMeetingIdsProvider?(), ["m2"])
+        XCTAssertEqual(todayMenu.items.count, itemsBefore.count)
+        XCTAssertTrue(zip(todayMenu.items, itemsBefore).allSatisfy { $0 === $1 })
+    }
+
+    /// 뺀 회의는 메뉴를 다시 열어도 꺼진 채여야 한다.
+    func testExcludedMeetingStaysUncheckedAfterReopening() {
         calendarSource.meetingsToReturn = [todayMeeting(id: "m1", hoursIntoDay: 9)]
+        openTodayMenu()
+        clickTodayItem(at: 0)
 
-        delegate.showTodaySchedule()
+        openTodayMenu()
 
-        XCTAssertEqual(delegate.todayScheduleWindow?.checkboxes.first?.state, .on)
+        XCTAssertEqual(todayCheckmarks(), [false, nil, nil])
+        XCTAssertEqual(todayMenu.items[0].state, .off)
     }
 
-    /// 체크를 끄면 그 회의가 자동 녹음 대상에서 빠지고, 창을 다시 열어도 유지돼야 한다.
-    func testUncheckingExcludesMeetingAndPersists() {
+    func testClickingExcludedMeetingIncludesItAgain() {
         calendarSource.meetingsToReturn = [todayMeeting(id: "m1", hoursIntoDay: 9)]
-        delegate.showTodaySchedule()
+        openTodayMenu()
+        clickTodayItem(at: 0)
 
-        delegate.todayScheduleWindow?.toggleCheckbox(at: 0)
-        delegate.showTodaySchedule()
+        clickTodayItem(at: 0)
 
-        XCTAssertEqual(delegate.todayScheduleWindow?.checkboxes.first?.state, .off)
+        XCTAssertEqual(todayCheckmarks(), [true, nil, nil])
+        XCTAssertEqual(delegate.coordinator.excludedMeetingIdsProvider?(), [])
     }
 
-    func testRecheckingIncludesMeetingAgain() {
+    /// 키보드로 고르면 뷰를 거치지 않고 action이 불린다. 이 경로도 같은 회의를 빼야 한다.
+    func testMeetingActionTogglesExclusion() {
         calendarSource.meetingsToReturn = [todayMeeting(id: "m1", hoursIntoDay: 9)]
-        delegate.showTodaySchedule()
-        delegate.todayScheduleWindow?.toggleCheckbox(at: 0)
+        openTodayMenu()
+        let item = todayMenu.items[0]
 
-        delegate.showTodaySchedule()
-        delegate.todayScheduleWindow?.toggleCheckbox(at: 0)
-        delegate.showTodaySchedule()
+        _ = delegate.perform(item.action!, with: item)
 
-        XCTAssertEqual(delegate.todayScheduleWindow?.checkboxes.first?.state, .on)
+        XCTAssertEqual(item.state, .off)
+        XCTAssertEqual(delegate.coordinator.excludedMeetingIdsProvider?(), ["m1"])
     }
 
-    /// 내일 일정까지 섞여 보이면 오늘 화면이 아니다.
-    func testTodayScheduleExcludesOtherDays() {
+    /// 새로고침은 메뉴를 연 채로 캘린더를 다시 읽어, 그사이 생긴 회의를 보여 줘야 한다.
+    func testRefreshPicksUpNewMeetings() {
+        calendarSource.meetingsToReturn = [todayMeeting(id: "m1", hoursIntoDay: 9)]
+        openTodayMenu()
+        let refreshItem = todayMenu.items.last
+
+        calendarSource.meetingsToReturn.append(todayMeeting(id: "m2", hoursIntoDay: 11))
+        clickTodayItem(at: todayMenu.items.count - 1)
+
+        XCTAssertEqual(todayMenu.items.map(\.title), ["09:00–09:30   m1", "11:00–11:30   m2", "", "새로고침"])
+        // 누른 새로고침 항목은 그대로 두어야 클릭을 처리하던 뷰가 메뉴에서 떨어져 나가지 않는다.
+        XCTAssertTrue(todayMenu.items.last === refreshItem)
+    }
+
+    func testRefreshKeepsExclusions() {
+        calendarSource.meetingsToReturn = [todayMeeting(id: "m1", hoursIntoDay: 9)]
+        openTodayMenu()
+        clickTodayItem(at: 0)
+
+        clickTodayItem(at: todayMenu.items.count - 1)
+
+        XCTAssertEqual(todayCheckmarks(), [false, nil, nil])
+    }
+
+    func testTodayMenuShowsPlaceholderWhenThereAreNoMeetings() {
+        openTodayMenu()
+
+        XCTAssertEqual(todayMenu.items.map(\.title), ["오늘 회의가 없습니다", "", "새로고침"])
+        XCTAssertFalse(todayMenu.items[0].isEnabled)
+        XCTAssertNil(todayMenu.items[0].view)
+    }
+
+    /// 회의가 모두 사라지면 이전 회의 줄 대신 안내 문구만 남아야 한다.
+    func testRefreshReplacesMeetingsWithPlaceholderWhenTheyAreGone() {
+        calendarSource.meetingsToReturn = [todayMeeting(id: "m1", hoursIntoDay: 9)]
+        openTodayMenu()
+
+        calendarSource.meetingsToReturn = []
+        clickTodayItem(at: todayMenu.items.count - 1)
+
+        XCTAssertEqual(todayMenu.items.map(\.title), ["오늘 회의가 없습니다", "", "새로고침"])
+    }
+
+    /// 내일 일정까지 섞여 보이면 오늘 목록이 아니다.
+    func testTodayMenuExcludesOtherDays() {
         calendarSource.meetingsToReturn = [
             todayMeeting(id: "today", hoursIntoDay: 9),
             todayMeeting(id: "tomorrow", hoursIntoDay: 33)
         ]
 
-        delegate.showTodaySchedule()
+        openTodayMenu()
 
-        XCTAssertEqual(delegate.todayScheduleWindow?.checkboxes.count, 1)
+        XCTAssertEqual(todayMenu.items.map(\.title), ["09:00–09:30   today", "", "새로고침"])
     }
 }

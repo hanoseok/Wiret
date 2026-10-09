@@ -1,6 +1,6 @@
 import Foundation
 
-/// 오늘 일정 화면에 보여줄 회의를 고르는 규칙.
+/// 오늘의 일정 메뉴에 보여줄 회의를 고르는 규칙.
 enum TodaySchedule {
     /// `date`와 같은 날에 시작하는 회의를 시작 시각 순으로 돌려준다.
     static func meetings(

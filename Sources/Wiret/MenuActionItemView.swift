@@ -3,7 +3,8 @@ import AppKit
 /// 누르면 메뉴를 닫지 않고 일을 하는 메뉴 항목.
 ///
 /// NSMenu는 일반 항목을 누르면 닫히지만 `NSMenuItem.view` 안의 클릭은 뷰에 맡기고 열어 둔다.
-/// 업데이트 확인처럼 결과를 그 자리에서 보여 주고 싶은 항목에 쓴다.
+/// 업데이트 확인처럼 결과를 그 자리에서 보여 주고 싶은 항목이나, 오늘의 일정처럼 여러 개를 연달아
+/// 켜고 끄는 항목에 쓴다.
 /// 겉모습은 다른 메뉴 항목과 같아야 눌러도 되는 항목으로 보이므로 글꼴·여백·강조를 흉내 낸다.
 final class MenuActionItemView: NSView {
     /// 체크마크 칸만큼 비워 두어야 글자가 다른 항목과 같은 줄에 선다.
@@ -31,6 +32,16 @@ final class MenuActionItemView: NSView {
         }
     }
 
+    /// 켜고 끄는 항목이면 체크 칸에 상태를 그린다. nil이면 업데이트 확인처럼 상태가 없는 항목이다.
+    ///
+    /// 뷰를 단 메뉴 항목은 `NSMenuItem.state`의 체크마크를 AppKit이 그려 주지 않으므로 직접 그린다.
+    var isChecked: Bool? {
+        didSet {
+            refreshAccessibilityValue()
+            needsDisplay = true
+        }
+    }
+
     private var isMouseInside = false {
         didSet { needsDisplay = true }
     }
@@ -46,6 +57,15 @@ final class MenuActionItemView: NSView {
         setAccessibilityRole(.menuItem)
         setAccessibilityLabel(title)
         fitWidthToTitle()
+    }
+
+    /// 직접 그린 체크마크는 VoiceOver가 볼 수 없으므로 켜짐·꺼짐을 값으로 알려 준다.
+    private func refreshAccessibilityValue() {
+        switch isChecked {
+        case .some(true): setAccessibilityValue("켜짐")
+        case .some(false): setAccessibilityValue("꺼짐")
+        case .none: setAccessibilityValue(nil)
+        }
     }
 
     override func accessibilityPerformPress() -> Bool {
@@ -115,6 +135,17 @@ final class MenuActionItemView: NSView {
         } else {
             color = .controlTextColor
         }
+        if isChecked == true {
+            // 강조 사각형 안쪽부터 글자 앞까지가 체크 칸이다. 그 가운데에 두고, 색은 제목과 같게 해야
+            // 강조됐을 때도 보인다.
+            let mark = NSAttributedString(string: "✓", attributes: titleAttributes(color: color))
+            let markSize = mark.size()
+            mark.draw(at: NSPoint(
+                x: (Self.highlightInset + Self.leadingInset - markSize.width) / 2,
+                y: (bounds.height - markSize.height) / 2
+            ))
+        }
+
         let text = NSAttributedString(string: title, attributes: titleAttributes(color: color))
         let size = text.size()
         let textRect = NSRect(
