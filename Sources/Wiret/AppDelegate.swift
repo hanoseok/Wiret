@@ -425,12 +425,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - 캘린더 선택
 
+    /// 메뉴에 지금 그려진 캘린더 목록. 메뉴를 연 채로 체크만 다시 맞출 때 "자동" 판단의 기준이 된다.
+    ///
+    /// 그사이 소스의 목록이 바뀌었더라도 화면에 보이는 줄과 어긋나지 않게, 다시 읽지 않고 그릴 때의 목록을 쓴다.
+    private var shownCalendars: [CalendarInfo] = []
+
+    /// 캘린더 목록을 새로 읽어 하위 메뉴를 다시 만든다. 하위 메뉴를 열 때만 부른다.
+    ///
+    /// 항목을 누른 동안 부르면 클릭을 처리하던 뷰가 메뉴에서 떨어져 나가므로, 누른 뒤에는
+    /// `refreshCalendarChecks()`로 체크만 바꾼다.
     func rebuildCalendarMenu() {
         guard let menu = calendarItem?.submenu else { return }
         menu.removeAllItems()
 
         let calendars = calendarSource.availableCalendars
-        let selected = selectedCalendarIDs
+        shownCalendars = calendars
 
         let automaticItem = NSMenuItem(
             title: "자동 (Google 캘린더)",
@@ -438,13 +447,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             keyEquivalent: ""
         )
         automaticItem.target = self
-        automaticItem.state = CalendarSelection.isAutomatic(all: calendars, selected: selected) ? .on : .off
+        // 일반 메뉴 항목은 누르면 메뉴가 닫혀 여러 캘린더를 고르려면 메뉴를 몇 번이고 다시 열어야 한다.
+        // 뷰 안의 클릭은 메뉴를 닫지 않으므로 뷰를 단다. 키보드로 고르면 위의 action이 불리고 메뉴가 닫힌다.
+        let automaticView = MenuActionItemView(title: automaticItem.title)
+        automaticView.onClick = { [weak self] in self?.selectAutomaticCalendars() }
+        automaticItem.view = automaticView
         menu.addItem(automaticItem)
 
         guard !calendars.isEmpty else {
             let empty = NSMenuItem(title: "캘린더를 읽을 수 없습니다", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
+            refreshCalendarChecks()
             return
         }
 
@@ -458,10 +472,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )
             item.target = self
             item.representedObject = calendar.id
-            item.state = selected.contains(calendar.id) ? .on : .off
+            let view = MenuActionItemView(title: calendar.title)
+            view.onClick = { [weak self, weak item] in
+                guard let item else { return }
+                self?.toggleCalendar(item)
+            }
             // 이름이 같은 캘린더가 여러 계정에 있을 수 있어 계정을 함께 보여준다.
+            // 뷰를 단 항목은 마우스가 뷰 위에 있으므로 뷰에도 같은 툴팁을 달아야 보인다.
             item.toolTip = calendar.sourceTitle
+            view.toolTip = calendar.sourceTitle
+            item.view = view
             menu.addItem(item)
+        }
+        refreshCalendarChecks()
+    }
+
+    /// 그려지는 체크마크와 `NSMenuItem.state`를 지금 선택에 맞춘다. 키보드 탐색과 테스트는 state를 본다.
+    ///
+    /// "자동"의 체크는 다른 캘린더의 선택으로 정해지므로 누른 줄만이 아니라 모든 줄을 다시 본다.
+    private func refreshCalendarChecks() {
+        guard let menu = calendarItem?.submenu else { return }
+        let selected = selectedCalendarIDs
+        for item in menu.items {
+            let checked: Bool
+            if item.action == #selector(selectAutomaticCalendars) {
+                checked = CalendarSelection.isAutomatic(all: shownCalendars, selected: selected)
+            } else if let id = item.representedObject as? String {
+                checked = selected.contains(id)
+            } else {
+                continue
+            }
+            item.state = checked ? .on : .off
+            (item.view as? MenuActionItemView)?.isChecked = checked
         }
     }
 
@@ -483,7 +525,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func applyCalendarSelectionChange() {
-        rebuildCalendarMenu()
+        // 누른 줄의 뷰가 아직 클릭을 처리하는 중이라 메뉴를 다시 만들지 않고 체크만 바꾼다.
+        refreshCalendarChecks()
         // 바뀐 선택으로 지금 회의 상태를 다시 판단한다.
         coordinator.tick()
         meetingNotifier.tick()

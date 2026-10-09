@@ -862,29 +862,98 @@ final class AppDelegateTests: XCTestCase {
         calendarMenu.items.first { $0.title == title }
     }
 
+    /// 마우스로 누르는 것처럼 항목의 뷰를 누른다. 뷰 안의 클릭은 메뉴를 닫지 않는다.
     private func clickCalendarItem(titled title: String) {
+        guard let view = calendarMenuItem(titled: title)?.view as? MenuActionItemView else {
+            return XCTFail("\(title) 항목이 누를 수 있는 뷰가 아닙니다")
+        }
+        view.performClick()
+    }
+
+    /// 키보드로 고르는 것처럼 뷰를 거치지 않고 action을 부른다.
+    private func chooseCalendarItemWithKeyboard(titled title: String) {
         guard let item = calendarMenuItem(titled: title), let action = item.action else {
             return XCTFail("\(title) 항목이 없습니다")
         }
         _ = delegate.perform(action, with: item)
     }
 
+    private func calendarCheckmarks() -> [Bool?] {
+        calendarMenu.items.map { ($0.view as? MenuActionItemView)?.isChecked }
+    }
+
     func testCalendarMenuListsEveryCalendar() {
         XCTAssertEqual(calendarMenu.items.map(\.title), ["자동 (Google 캘린더)", "", "업무", "개인"])
+    }
+
+    /// 여러 캘린더를 연달아 고를 수 있게, 켜고 끄는 줄은 모두 메뉴를 닫지 않는 뷰여야 한다.
+    func testCheckableCalendarItemsUseViewsThatKeepMenuOpen() {
+        for title in ["자동 (Google 캘린더)", "업무", "개인"] {
+            let item = calendarMenuItem(titled: title)
+            let view = item?.view as? MenuActionItemView
+            XCTAssertNotNil(view, title)
+            XCTAssertEqual(view?.title, title)
+            // 키보드로 골라도 같은 일을 하도록 action은 남아 있어야 한다.
+            XCTAssertNotNil(item?.action, title)
+            XCTAssertTrue(item?.target === delegate, title)
+        }
+        XCTAssertTrue(calendarMenu.items[1].isSeparatorItem)
+        XCTAssertNil(calendarMenu.items[1].view)
+    }
+
+    /// 같은 이름의 캘린더를 구분하는 계정 이름은 마우스가 올라가는 뷰에도 있어야 보인다.
+    func testCalendarItemsShowAccountAsToolTip() {
+        let item = calendarMenuItem(titled: "업무")
+        XCTAssertEqual(item?.toolTip, "aston@kakaocorp.com")
+        XCTAssertEqual(item?.view?.toolTip, "aston@kakaocorp.com")
+        XCTAssertEqual(item?.representedObject as? String, "work")
     }
 
     /// 계정을 골라 두지 않았으면 예전 동작(Google 캘린더)이 켜져 있어야 한다.
     func testAutomaticIsSelectedByDefault() {
         XCTAssertEqual(calendarMenuItem(titled: "자동 (Google 캘린더)")?.state, .on)
         XCTAssertEqual(calendarMenuItem(titled: "업무")?.state, .off)
+        XCTAssertEqual(calendarCheckmarks(), [true, nil, false, false])
     }
 
-    func testSelectingCalendarChecksItAndClearsAutomatic() {
+    /// 누르면 체크만 그 자리에서 바뀌고 줄은 그대로 남아 이어서 누를 수 있어야 한다.
+    func testSelectingCalendarChecksItAndClearsAutomaticInPlace() {
+        let itemsBefore = calendarMenu.items
+
         clickCalendarItem(titled: "업무")
 
         XCTAssertEqual(delegate.selectedCalendarIDs, ["work"])
         XCTAssertEqual(calendarMenuItem(titled: "업무")?.state, .on)
         XCTAssertEqual(calendarMenuItem(titled: "자동 (Google 캘린더)")?.state, .off)
+        XCTAssertEqual(calendarCheckmarks(), [false, nil, true, false])
+        XCTAssertEqual(calendarMenu.items.count, itemsBefore.count)
+        XCTAssertTrue(zip(calendarMenu.items, itemsBefore).allSatisfy { $0 === $1 })
+    }
+
+    func testChoosingAutomaticRechecksItAndUnchecksCalendarsInPlace() {
+        clickCalendarItem(titled: "업무")
+        clickCalendarItem(titled: "개인")
+        let itemsBefore = calendarMenu.items
+
+        clickCalendarItem(titled: "자동 (Google 캘린더)")
+
+        XCTAssertEqual(calendarCheckmarks(), [true, nil, false, false])
+        XCTAssertEqual(calendarMenuItem(titled: "자동 (Google 캘린더)")?.state, .on)
+        XCTAssertEqual(calendarMenuItem(titled: "업무")?.state, .off)
+        XCTAssertTrue(zip(calendarMenu.items, itemsBefore).allSatisfy { $0 === $1 })
+    }
+
+    /// 키보드로 고르면 뷰를 거치지 않고 action이 불린다. 이 경로도 같은 선택을 바꿔야 한다.
+    func testKeyboardSelectionTogglesCalendar() {
+        chooseCalendarItemWithKeyboard(titled: "업무")
+
+        XCTAssertEqual(delegate.selectedCalendarIDs, ["work"])
+        XCTAssertEqual(calendarCheckmarks(), [false, nil, true, false])
+
+        chooseCalendarItemWithKeyboard(titled: "자동 (Google 캘린더)")
+
+        XCTAssertTrue(delegate.selectedCalendarIDs.isEmpty)
+        XCTAssertEqual(calendarCheckmarks(), [true, nil, false, false])
     }
 
     func testSelectingSeveralCalendarsKeepsBoth() {
@@ -949,6 +1018,8 @@ final class AppDelegateTests: XCTestCase {
 
         XCTAssertEqual(calendarMenu.items.map(\.title), ["자동 (Google 캘린더)", "캘린더를 읽을 수 없습니다"])
         XCTAssertFalse(calendarMenu.items[1].isEnabled)
+        XCTAssertNil(calendarMenu.items[1].view)
+        XCTAssertEqual(calendarCheckmarks(), [true, nil])
     }
 
     // MARK: - 오늘의 일정
