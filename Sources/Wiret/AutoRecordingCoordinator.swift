@@ -30,7 +30,7 @@ final class AutoRecordingCoordinator {
     var isStartInFlightProvider: (() -> Bool)?
     /// 음성 메모 앱이 직접 녹음 중인지. 그동안에는 자동 녹음도 자동 중단도 하지 않는다.
     var isExternalRecordingProvider: (() -> Bool)?
-    /// 오늘 일정 화면에서 사용자가 자동 녹음에서 빼 둔 회의.
+    /// 오늘의 일정 메뉴에서 사용자가 자동 녹음에서 빼 둔 회의.
     var excludedMeetingIdsProvider: (() -> Set<String>)?
     /// 회의 알림이 켜져 있는지. 켜져 있으면 회의가 끝났을 때 녹음을 멈추지 않고 알림에 넘긴다.
     /// 사용자가 회의가 길어졌는지 보고 직접 끝낼 수 있게 하려는 것이다.

@@ -53,7 +53,7 @@ final class MeetingNotificationCoordinator {
     var isAutoRecordingProvider: (() -> Bool)?
     /// 음성 메모 앱이 직접 녹음 중인지. 그동안에는 시작 알림을 띄우지 않는다.
     var isExternalRecordingProvider: (() -> Bool)?
-    /// 오늘 일정 화면에서 뺀 회의. 녹음하고 싶지 않다는 뜻이므로 알림도 띄우지 않는다.
+    /// 오늘의 일정 메뉴에서 뺀 회의. 녹음하고 싶지 않다는 뜻이므로 알림도 띄우지 않는다.
     var excludedMeetingIdsProvider: (() -> Set<String>)?
 
     private(set) var pendingPrompt: MeetingNotificationPrompt?
