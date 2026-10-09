@@ -94,12 +94,40 @@ private final class StubMeetingSource: MeetingSource {
     func meetings(from: Date, to: Date) -> [Meeting] { meetingsToReturn }
 }
 
+/// 실제 `SMAppService`는 이 Mac의 로그인 항목을 바꾸므로 테스트의 모든 AppDelegate는 이 가짜를 받는다.
+private final class FakeLaunchAtLogin: LaunchAtLoginControlling {
+    var status: LaunchAtLoginStatus = .notRegistered
+    /// 등록이 끝난 뒤 보고할 상태. 관리 정책 때문에 허용을 기다리는 경우를 흉내 낼 때 바꾼다.
+    var statusAfterRegister: LaunchAtLoginStatus = .enabled
+    var errorToThrow: Error?
+    private(set) var registerCount = 0
+    private(set) var unregisterCount = 0
+    private(set) var openSystemSettingsCount = 0
+
+    func register() throws {
+        registerCount += 1
+        if let errorToThrow { throw errorToThrow }
+        status = statusAfterRegister
+    }
+
+    func unregister() throws {
+        unregisterCount += 1
+        if let errorToThrow { throw errorToThrow }
+        status = .notRegistered
+    }
+
+    func openSystemSettings() { openSystemSettingsCount += 1 }
+}
+
+private struct LaunchAtLoginTestError: Error {}
+
 final class AppDelegateTests: XCTestCase {
     private let suiteName = "WiretAppDelegateTests"
     private var delegate: AppDelegate!
     private var shortcutRunner: StubShortcutRunner!
     private var shortcutInstaller: StubShortcutInstaller!
     private var calendarSource: StubMeetingSource!
+    private var launchAtLogin: FakeLaunchAtLogin!
 
     override func setUp() {
         super.setUp()
@@ -110,6 +138,7 @@ final class AppDelegateTests: XCTestCase {
         shortcutRunner = StubShortcutRunner()
         shortcutInstaller = StubShortcutInstaller()
         calendarSource = StubMeetingSource()
+        launchAtLogin = FakeLaunchAtLogin()
         calendarSource.availableCalendars = [
             CalendarInfo(id: "work", title: "업무", sourceTitle: "aston@kakaocorp.com"),
             CalendarInfo(id: "personal", title: "개인", sourceTitle: "aston@gmail.com")
@@ -118,7 +147,8 @@ final class AppDelegateTests: XCTestCase {
             defaults: testDefaults,
             voiceMemosImporter: VoiceMemosImporter(runner: shortcutRunner),
             shortcutInstaller: VoiceMemosShortcutInstaller(installer: shortcutInstaller),
-            calendarSource: calendarSource
+            calendarSource: calendarSource,
+            launchAtLogin: launchAtLogin
         )
         delegate.suppressAlertsForTesting = true
         delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
@@ -130,6 +160,7 @@ final class AppDelegateTests: XCTestCase {
         shortcutRunner = nil
         shortcutInstaller = nil
         calendarSource = nil
+        launchAtLogin = nil
         delegate = nil
         super.tearDown()
     }
@@ -139,23 +170,24 @@ final class AppDelegateTests: XCTestCase {
             XCTFail("menu missing")
             return
         }
-        XCTAssertEqual(menu.items.count, 14)
+        XCTAssertEqual(menu.items.count, 15)
         XCTAssertEqual(menu.items[0].title, "녹음 시작")
         XCTAssertEqual(menu.items[1].title, "녹음 중단")
         XCTAssertTrue(menu.items[2].isSeparatorItem)
         XCTAssertEqual(menu.items[3].title, "자동")
         XCTAssertEqual(menu.items[4].title, "알림")
-        XCTAssertFalse(menu.items[5].isEnabled)
-        XCTAssertEqual(menu.items[6].title, "캘린더")
-        XCTAssertNotNil(menu.items[6].submenu)
-        XCTAssertEqual(menu.items[7].title, "오늘의 일정")
-        XCTAssertEqual(menu.items[8].title, "업데이트 확인")
-        XCTAssertEqual(menu.items[9].title, delegate.versionItem.title)
-        XCTAssertFalse(menu.items[9].isEnabled)
-        XCTAssertEqual(menu.items[10].title, "음성 메모로 보내기")
-        XCTAssertEqual(menu.items[11].title, "음성 메모 단축어 삭제")
-        XCTAssertTrue(menu.items[12].isSeparatorItem)
-        XCTAssertEqual(menu.items[13].title, "종료")
+        XCTAssertEqual(menu.items[5].title, "로그인 시 실행")
+        XCTAssertFalse(menu.items[6].isEnabled)
+        XCTAssertEqual(menu.items[7].title, "캘린더")
+        XCTAssertNotNil(menu.items[7].submenu)
+        XCTAssertEqual(menu.items[8].title, "오늘의 일정")
+        XCTAssertEqual(menu.items[9].title, "업데이트 확인")
+        XCTAssertEqual(menu.items[10].title, delegate.versionItem.title)
+        XCTAssertFalse(menu.items[10].isEnabled)
+        XCTAssertEqual(menu.items[11].title, "음성 메모로 보내기")
+        XCTAssertEqual(menu.items[12].title, "음성 메모 단축어 삭제")
+        XCTAssertTrue(menu.items[13].isSeparatorItem)
+        XCTAssertEqual(menu.items[14].title, "종료")
         XCTAssertFalse(menu.autoenablesItems)
     }
 
@@ -193,6 +225,7 @@ final class AppDelegateTests: XCTestCase {
             voiceMemosImporter: VoiceMemosImporter(runner: shortcutRunner),
             shortcutInstaller: VoiceMemosShortcutInstaller(installer: shortcutInstaller),
             calendarSource: calendarSource,
+            launchAtLogin: launchAtLogin,
             updateCoordinator: coordinator
         )
         versionedDelegate.suppressAlertsForTesting = true
@@ -227,6 +260,7 @@ final class AppDelegateTests: XCTestCase {
             voiceMemosImporter: VoiceMemosImporter(runner: shortcutRunner),
             shortcutInstaller: VoiceMemosShortcutInstaller(installer: shortcutInstaller),
             calendarSource: calendarSource,
+            launchAtLogin: launchAtLogin,
             updateCoordinator: coordinator
         )
         versionedDelegate.suppressAlertsForTesting = true
@@ -277,7 +311,7 @@ final class AppDelegateTests: XCTestCase {
         XCTAssertEqual((versionedDelegate.updateItem.view as? MenuActionItemView)?.title, "최신 버전입니다")
         XCTAssertTrue(versionedDelegate.updateItem.isEnabled, "다시 눌러 확인할 수 있어야 합니다")
         XCTAssertNil(versionedDelegate.updateAvailableItem)
-        XCTAssertEqual(versionedDelegate.statusItem.menu?.items.count, 14)
+        XCTAssertEqual(versionedDelegate.statusItem.menu?.items.count, 15)
     }
 
     func testManualCheckShowsUpdateButtonRightAfterUpdateItem() {
@@ -299,7 +333,7 @@ final class AppDelegateTests: XCTestCase {
         XCTAssertEqual(button.title, "0.0.13-SNAPSHOT으로 업데이트")
         XCTAssertTrue(button.isEnabled)
         XCTAssertEqual(versionedDelegate.updateItem.title, "업데이트 확인")
-        XCTAssertEqual(menu.items.count, 15)
+        XCTAssertEqual(menu.items.count, 16)
     }
 
     func testManualCheckFailureShowsRetryTitle() {
@@ -388,7 +422,7 @@ final class AppDelegateTests: XCTestCase {
         let menu = versionedDelegate.statusItem.menu!
         XCTAssertEqual(menu.items.filter { $0.title.hasSuffix("으로 업데이트") }.count, 1)
         XCTAssertEqual(versionedDelegate.updateAvailableItem?.title, "0.0.14-SNAPSHOT으로 업데이트")
-        XCTAssertEqual(menu.items.count, 15)
+        XCTAssertEqual(menu.items.count, 16)
     }
 
     /// 내려받는 동안에는 또 누르지 못하게 막고, 실패하면 다시 누를 수 있게 되돌린다.
@@ -638,7 +672,8 @@ final class AppDelegateTests: XCTestCase {
             defaults: UserDefaults(suiteName: suiteName)!,
             voiceMemosImporter: VoiceMemosImporter(runner: shortcutRunner),
             shortcutInstaller: VoiceMemosShortcutInstaller(installer: shortcutInstaller),
-            calendarSource: calendarSource
+            calendarSource: calendarSource,
+            launchAtLogin: launchAtLogin
         )
 
         XCTAssertTrue(relaunched.meetingNotifier.isEnabled)
@@ -728,6 +763,95 @@ final class AppDelegateTests: XCTestCase {
         XCTAssertNil(delegate.meetingNotifier.pendingPrompt)
     }
 
+    // MARK: - 로그인 시 실행
+
+    /// 로그인 항목은 시스템 설정이라 사용자가 켜기 전에는 등록하지 않는다.
+    func testLaunchAtLoginIsOffByDefault() {
+        XCTAssertEqual(delegate.launchAtLoginItem.title, "로그인 시 실행")
+        XCTAssertEqual(delegate.launchAtLoginItem.state, .off)
+        XCTAssertEqual(launchAtLogin.registerCount, 0)
+        XCTAssertEqual(launchAtLogin.unregisterCount, 0)
+    }
+
+    func testTogglingLaunchAtLoginRegisters() {
+        delegate.perform(#selector(AppDelegate.toggleLaunchAtLoginForTesting))
+
+        XCTAssertEqual(launchAtLogin.registerCount, 1)
+        XCTAssertEqual(delegate.launchAtLoginItem.state, .on)
+        XCTAssertNil(delegate.launchAtLoginItem.toolTip)
+        XCTAssertEqual(launchAtLogin.openSystemSettingsCount, 0)
+    }
+
+    func testTogglingLaunchAtLoginAgainUnregisters() {
+        delegate.perform(#selector(AppDelegate.toggleLaunchAtLoginForTesting))
+        delegate.perform(#selector(AppDelegate.toggleLaunchAtLoginForTesting))
+
+        XCTAssertEqual(launchAtLogin.unregisterCount, 1)
+        XCTAssertEqual(delegate.launchAtLoginItem.state, .off)
+    }
+
+    /// 허용을 기다리는 동안은 실제로 실행되지 않으니 켜짐과 구분하고, 허용할 곳을 열어 준다.
+    func testLaunchAtLoginRequiringApprovalShowsMixedAndOpensSettings() {
+        launchAtLogin.statusAfterRegister = .requiresApproval
+
+        delegate.perform(#selector(AppDelegate.toggleLaunchAtLoginForTesting))
+
+        XCTAssertEqual(delegate.launchAtLoginItem.state, .mixed)
+        XCTAssertEqual(
+            delegate.launchAtLoginItem.toolTip,
+            "시스템 설정 > 일반 > 로그인 항목에서 Wiret을 허용해야 합니다"
+        )
+        XCTAssertEqual(launchAtLogin.openSystemSettingsCount, 1)
+    }
+
+    /// 허용 대기 중에 다시 누르면 끄지 않고 등록을 다시 시도한다. 켜짐일 때만 끈다.
+    func testTogglingWhileRequiringApprovalRegistersAgain() {
+        launchAtLogin.status = .requiresApproval
+        launchAtLogin.statusAfterRegister = .requiresApproval
+
+        delegate.perform(#selector(AppDelegate.toggleLaunchAtLoginForTesting))
+
+        XCTAssertEqual(launchAtLogin.registerCount, 1)
+        XCTAssertEqual(launchAtLogin.unregisterCount, 0)
+    }
+
+    func testLaunchAtLoginRegisterFailureLeavesItemOff() {
+        launchAtLogin.errorToThrow = LaunchAtLoginTestError()
+
+        delegate.perform(#selector(AppDelegate.toggleLaunchAtLoginForTesting))
+
+        XCTAssertEqual(launchAtLogin.registerCount, 1)
+        XCTAssertEqual(delegate.launchAtLoginItem.state, .off)
+        XCTAssertEqual(launchAtLogin.openSystemSettingsCount, 0)
+    }
+
+    func testLaunchAtLoginUnregisterFailureKeepsItemOn() {
+        delegate.perform(#selector(AppDelegate.toggleLaunchAtLoginForTesting))
+        launchAtLogin.errorToThrow = LaunchAtLoginTestError()
+
+        delegate.perform(#selector(AppDelegate.toggleLaunchAtLoginForTesting))
+
+        XCTAssertEqual(launchAtLogin.unregisterCount, 1)
+        XCTAssertEqual(delegate.launchAtLoginItem.state, .on)
+    }
+
+    /// 로그인 항목은 시스템 설정에서도 바뀌므로 메뉴를 열 때 실제 상태를 다시 읽어야 한다.
+    func testMenuWillOpenPicksUpExternalLaunchAtLoginChange() {
+        XCTAssertEqual(delegate.launchAtLoginItem.state, .off)
+
+        launchAtLogin.status = .enabled
+        delegate.menuWillOpen(delegate.statusItem.menu!)
+        XCTAssertEqual(delegate.launchAtLoginItem.state, .on)
+
+        launchAtLogin.status = .requiresApproval
+        delegate.menuWillOpen(delegate.statusItem.menu!)
+        XCTAssertEqual(delegate.launchAtLoginItem.state, .mixed)
+
+        launchAtLogin.status = .notFound
+        delegate.menuWillOpen(delegate.statusItem.menu!)
+        XCTAssertEqual(delegate.launchAtLoginItem.state, .off)
+    }
+
     // MARK: - 캘린더 선택
 
     private var calendarMenu: NSMenu {
@@ -800,7 +924,8 @@ final class AppDelegateTests: XCTestCase {
             defaults: UserDefaults(suiteName: suiteName)!,
             voiceMemosImporter: VoiceMemosImporter(runner: shortcutRunner),
             shortcutInstaller: VoiceMemosShortcutInstaller(installer: shortcutInstaller),
-            calendarSource: calendarSource
+            calendarSource: calendarSource,
+            launchAtLogin: launchAtLogin
         )
 
         XCTAssertEqual(relaunched.selectedCalendarIDs, ["work"])

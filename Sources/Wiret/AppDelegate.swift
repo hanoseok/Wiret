@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let defaults: UserDefaults
     private let voiceMemosImporter: VoiceMemosImporter
     private let shortcutInstaller: VoiceMemosShortcutInstaller
+    private let launchAtLogin: LaunchAtLoginControlling
     private(set) lazy var coordinator = AutoRecordingCoordinator(source: calendarSource, defaults: defaults)
     private(set) lazy var meetingNotifier = MeetingNotificationCoordinator(source: calendarSource, defaults: defaults)
 
@@ -19,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private(set) var stopItem: NSMenuItem!
     private(set) var autoItem: NSMenuItem!
     private(set) var notificationItem: NSMenuItem!
+    private(set) var launchAtLoginItem: NSMenuItem!
     private(set) var autoStatusItem: NSMenuItem!
     private(set) var calendarItem: NSMenuItem!
     private(set) var todayScheduleItem: NSMenuItem!
@@ -66,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         shortcutInstaller: VoiceMemosShortcutInstaller = VoiceMemosShortcutInstaller(),
         calendarSource: MeetingSource = EventKitMeetingSource(),
         externalRecordingDetector: ExternalRecordingDetecting = CoreAudioRecordingDetector(),
+        launchAtLogin: LaunchAtLoginControlling = SystemLaunchAtLogin(),
         updateCoordinator: UpdateCoordinator = UpdateCoordinator(
             currentVersion: BundleVersion.current(),
             checker: GitHubUpdateChecker(),
@@ -78,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.externalRecordingDetector = externalRecordingDetector
         self.voiceMemosImporter = voiceMemosImporter
         self.shortcutInstaller = shortcutInstaller
+        self.launchAtLogin = launchAtLogin
         super.init()
     }
 
@@ -132,6 +136,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         notificationItem = NSMenuItem(title: "알림", action: #selector(toggleNotifications), keyEquivalent: "")
         notificationItem.target = self
         menu.addItem(notificationItem)
+
+        // 자동·알림처럼 앱 전체에 걸리는 켜기/끄기 설정이라 그 바로 아래에 둔다.
+        launchAtLoginItem = NSMenuItem(
+            title: "로그인 시 실행",
+            action: #selector(toggleLaunchAtLogin),
+            keyEquivalent: ""
+        )
+        launchAtLoginItem.target = self
+        menu.addItem(launchAtLoginItem)
+        refreshLaunchAtLoginItem()
 
         autoStatusItem = NSMenuItem(title: "자동: 꺼짐", action: nil, keyEquivalent: "")
         autoStatusItem.isEnabled = false
@@ -400,6 +414,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         refreshShortcutItem()
+        // 로그인 항목은 시스템 설정에서도 켜고 끌 수 있으므로 열 때마다 실제 상태를 다시 읽는다.
+        refreshLaunchAtLoginItem()
         // 며칠 전의 "최신 버전입니다"가 남아 있으면 지금도 최신인 것처럼 읽힌다. 확인 중일 때만 그대로 둔다.
         if updateCheckStatus != .checking {
             updateCheckStatus = .idle
@@ -538,6 +554,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleNotifications() {
         meetingNotifier.setEnabled(!meetingNotifier.isEnabled)
         notificationItem.state = meetingNotifier.isEnabled ? .on : .off
+    }
+
+    // MARK: - 로그인 시 실행
+
+    /// 테스트에서 메뉴 동작을 그대로 호출하기 위한 통로.
+    @objc func toggleLaunchAtLoginForTesting() {
+        toggleLaunchAtLogin()
+    }
+
+    /// 실행할 때 저절로 등록하지는 않는다. 로그인 항목은 시스템 설정이라 사용자가 메뉴에서 직접 고르게 한다.
+    @objc private func toggleLaunchAtLogin() {
+        do {
+            if launchAtLogin.status == .enabled {
+                try launchAtLogin.unregister()
+            } else {
+                try launchAtLogin.register()
+                // 관리 정책이나 사용자 설정에 따라 등록만 되고 허용을 기다릴 수 있다. 허용할 곳을 바로 열어 준다.
+                if launchAtLogin.status == .requiresApproval {
+                    launchAtLogin.openSystemSettings()
+                    showLaunchAtLoginApprovalAlert()
+                }
+            }
+        } catch {
+            showLaunchAtLoginErrorAlert(error)
+        }
+        refreshLaunchAtLoginItem()
+    }
+
+    private static let launchAtLoginApprovalTip = "시스템 설정 > 일반 > 로그인 항목에서 Wiret을 허용해야 합니다"
+
+    func refreshLaunchAtLoginItem() {
+        guard let launchAtLoginItem else { return }
+        switch launchAtLogin.status {
+        case .enabled:
+            launchAtLoginItem.state = .on
+            launchAtLoginItem.toolTip = nil
+        case .requiresApproval:
+            // 등록은 됐지만 아직 실행되지 않는 상태라 켜짐과 구분해 보여 준다.
+            launchAtLoginItem.state = .mixed
+            launchAtLoginItem.toolTip = Self.launchAtLoginApprovalTip
+        case .notRegistered, .notFound:
+            launchAtLoginItem.state = .off
+            launchAtLoginItem.toolTip = nil
+        }
     }
 
     private func configureMeetingNotifier() {
@@ -1000,6 +1060,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let alert = NSAlert()
         alert.messageText = "음성 메모로 가져오지 못했습니다"
         alert.informativeText = (error.errorDescription ?? "") + "\n\n녹음 파일은 ~/Music/Wiret 에 그대로 남아 있습니다."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "확인")
+        alert.runModal()
+    }
+
+    private func showLaunchAtLoginApprovalAlert() {
+        if suppressAlertsForTesting { return }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "로그인 항목에서 Wiret을 허용해주세요"
+        alert.informativeText = "시스템 설정 > 일반 > 로그인 항목을 열어 두었습니다. 목록에서 Wiret을 허용하면 로그인할 때 자동으로 실행됩니다."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "확인")
+        alert.runModal()
+    }
+
+    private func showLaunchAtLoginErrorAlert(_ error: Error) {
+        if suppressAlertsForTesting { return }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "로그인 시 실행을 바꾸지 못했습니다"
+        alert.informativeText = error.localizedDescription
         alert.alertStyle = .warning
         alert.addButton(withTitle: "확인")
         alert.runModal()
